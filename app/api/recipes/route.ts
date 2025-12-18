@@ -10,7 +10,10 @@ export async function GET() {
 
   const recipes = await prisma.recipe.findMany({
     where: { userId: user.id },
-    orderBy: { createdAt: "desc" },
+    orderBy: [
+      { sortOrder: "asc" },
+      { createdAt: "asc" },
+    ],
   });
 
   return NextResponse.json({ recipes });
@@ -61,6 +64,15 @@ export async function POST(request: Request) {
   }
 
   try {
+    const lowestOrder = await prisma.recipe.aggregate({
+      where: { userId: user.id },
+      _min: { sortOrder: true },
+    });
+    const nextSortOrder =
+      typeof lowestOrder._min.sortOrder === "number"
+        ? lowestOrder._min.sortOrder - 1
+        : 0;
+
     const recipe = await prisma.recipe.create({
       data: {
         userId: user.id,
@@ -71,6 +83,7 @@ export async function POST(request: Request) {
             : null,
         ingredients,
         tags: normalizedTags,
+        sortOrder: nextSortOrder,
       },
     });
     return NextResponse.json({ recipe }, { status: 201 });

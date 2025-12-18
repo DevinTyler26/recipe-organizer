@@ -1,7 +1,14 @@
 "use client";
 
 import Link from "next/link";
-import { useCallback, useEffect, useState, type FormEvent } from "react";
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useState,
+  type DragEvent,
+  type FormEvent,
+} from "react";
 import { signIn, signOut, useSession } from "next-auth/react";
 import { useShoppingList } from "@/components/shopping-list-context";
 
@@ -12,7 +19,6 @@ type ToastMessage = {
   message: string;
   tone: ToastTone;
 };
-
 type Recipe = {
   id: string;
   title: string;
@@ -20,9 +26,14 @@ type Recipe = {
   ingredients: string[];
   tags: string[];
   isFavorite: boolean;
+  order: number;
 };
 
-type StoredRecipe = Omit<Recipe, "tags"> & { tags?: string[] };
+type StoredRecipe = Omit<Recipe, "tags" | "order"> & {
+  tags?: string[];
+  order?: number;
+  sortOrder?: number;
+};
 
 const toastToneStyles: Record<ToastTone, string> = {
   success:
@@ -49,6 +60,7 @@ const starterRecipes: Recipe[] = [
     ],
     tags: ["Vegetarian", "Make-ahead"],
     isFavorite: true,
+    order: 0,
   },
   {
     id: "starter-sheet-pan-gnocchi",
@@ -66,6 +78,7 @@ const starterRecipes: Recipe[] = [
     ],
     tags: ["Weeknight", "Sheet pan"],
     isFavorite: false,
+    order: 1,
   },
   {
     id: "starter-midnight-brownies",
@@ -82,6 +95,7 @@ const starterRecipes: Recipe[] = [
     ],
     tags: ["Dessert", "Crowd-pleaser"],
     isFavorite: false,
+    order: 2,
   },
 ];
 
@@ -129,13 +143,25 @@ const parseTagsInput = (value: string) => dedupeTags(value.split(/,|\n/));
 const ensureTagsArray = (tags?: string[]) =>
   dedupeTags(Array.isArray(tags) ? tags : []);
 
-const normalizeRecipe = (recipe: StoredRecipe): Recipe => ({
-  ...recipe,
-  tags: ensureTagsArray(recipe.tags),
-});
+const normalizeRecipe = (recipe: StoredRecipe): Recipe => {
+  const normalizedOrder =
+    typeof recipe.order === "number"
+      ? recipe.order
+      : typeof recipe.sortOrder === "number"
+      ? recipe.sortOrder
+      : 0;
+
+  return {
+    ...recipe,
+    order: normalizedOrder,
+    tags: ensureTagsArray(recipe.tags),
+  };
+};
 
 const normalizeRecipeList = (list?: StoredRecipe[] | null) =>
-  Array.isArray(list) ? list.map(normalizeRecipe) : [];
+  Array.isArray(list)
+    ? list.map(normalizeRecipe).sort((a, b) => a.order - b.order)
+    : [];
 
 export default function HomePage() {
   const { addItems, totalItems } = useShoppingList();
@@ -164,8 +190,13 @@ export default function HomePage() {
     "default"
   );
   const [sortPreferenceLoaded, setSortPreferenceLoaded] = useState(false);
+  const [draggingRecipeId, setDraggingRecipeId] = useState<string | null>(null);
   const [hasHydrated, setHasHydrated] = useState(false);
   const accountLabel = session?.user?.name || session?.user?.email || "Account";
+  const orderedRecipes = useMemo(
+    () => [...recipes].sort((a, b) => a.order - b.order),
+    [recipes]
+  );
 
   const showToast = useCallback(
     (message: string, tone: ToastTone = "success") => {
@@ -175,6 +206,32 @@ export default function HomePage() {
       ]);
     },
     []
+  );
+
+  const persistRecipeOrder = useCallback(
+    async (orderedIds: string[]) => {
+      if (!isAuthenticated || orderedIds.length === 0) {
+        return;
+      }
+
+      try {
+        const response = await fetch("/api/recipes/reorder", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ order: orderedIds }),
+        });
+        if (!response.ok) {
+          const body = (await response.json().catch(() => null)) as {
+            error?: string;
+          } | null;
+          throw new Error(body?.error ?? "Failed to sync order");
+        }
+      } catch (error) {
+        console.error("Failed to persist recipe order", error);
+        showToast("Unable to sync recipe order. We'll retry soon.", "error");
+      }
+    },
+    [isAuthenticated, showToast]
   );
 
   const dismissToast = () => setActiveToast(null);
@@ -391,6 +448,10 @@ export default function HomePage() {
     }
 
     if (!isAuthenticated) {
+      const nextLocalOrder =
+        recipes.length > 0
+          ? Math.min(...recipes.map((existing) => existing.order)) - 1
+          : 0;
       const newRecipe: Recipe = {
         id: generateRecipeId(),
         title: trimmedTitle,
@@ -398,6 +459,7 @@ export default function HomePage() {
         ingredients,
         tags,
         isFavorite: false,
+        order: nextLocalOrder,
       };
       setRecipes((current) => [newRecipe, ...current]);
       resetFormState();
@@ -638,9 +700,10 @@ export default function HomePage() {
     };
   }, [actionsMenuRecipeId, handleDeleteRecipe, handleEditRecipe, recipes]);
 
-  const favoritesOnly = recipes.filter((recipe) => recipe.isFavorite);
+  const favoritesOnly = orderedRecipes.filter((recipe) => recipe.isFavorite);
   const favoriteCount = favoritesOnly.length;
-  const baseLibrary = libraryFilter === "favorites" ? favoritesOnly : recipes;
+  const baseLibrary =
+    libraryFilter === "favorites" ? favoritesOnly : orderedRecipes;
   const favoritesViewEmpty =
     libraryFilter === "favorites" && favoriteCount === 0;
   const effectiveSortMode = favoritesViewEmpty ? "default" : sortMode;
@@ -654,8 +717,124 @@ export default function HomePage() {
   const librarySummary =
     libraryFilter === "favorites"
       ? `${favoriteCount} favorite${favoriteCount === 1 ? "" : "s"}`
-      : `${recipes.length} saved`;
+      : `${orderedRecipes.length} saved`;
   const shoppingListTotal = hasHydrated ? totalItems : 0;
+  const canDragReorder =
+    effectiveSortMode === "default" && displayedRecipes.length > 1;
+
+  useEffect(() => {
+    if (!canDragReorder && draggingRecipeId) {
+      setDraggingRecipeId(null);
+    }
+  }, [canDragReorder, draggingRecipeId]);
+
+  const finalizeRecipeDrag = useCallback(() => {
+    setDraggingRecipeId(null);
+  }, []);
+
+  const reorderRelative = useCallback(
+    (targetId: string | null, placeAfter: boolean) => {
+      if (!draggingRecipeId) {
+        return;
+      }
+      setRecipes((current) => {
+        const ordered = [...current].sort((a, b) => a.order - b.order);
+        const movingIndex = ordered.findIndex(
+          (recipe) => recipe.id === draggingRecipeId
+        );
+        if (movingIndex === -1) {
+          return ordered;
+        }
+        const [movingRecipe] = ordered.splice(movingIndex, 1);
+        if (targetId === null) {
+          ordered.push(movingRecipe);
+        } else {
+          const targetIndex = ordered.findIndex(
+            (recipe) => recipe.id === targetId
+          );
+          const insertIndex =
+            targetIndex === -1
+              ? ordered.length
+              : targetIndex + (placeAfter ? 1 : 0);
+          ordered.splice(insertIndex, 0, movingRecipe);
+        }
+        const next = ordered.map((recipe, index) => ({
+          ...recipe,
+          order: index,
+        }));
+        if (isAuthenticated) {
+          void persistRecipeOrder(next.map((recipe) => recipe.id));
+        }
+        return next;
+      });
+      finalizeRecipeDrag();
+    },
+    [draggingRecipeId, finalizeRecipeDrag, isAuthenticated, persistRecipeOrder]
+  );
+
+  const beginRecipeDrag = useCallback(
+    (recipeId: string, event: DragEvent<HTMLElement>) => {
+      if (!canDragReorder) {
+        return;
+      }
+      setDraggingRecipeId(recipeId);
+      event.dataTransfer.effectAllowed = "move";
+      event.dataTransfer.setData("text/plain", recipeId);
+    },
+    [canDragReorder]
+  );
+
+  const handleRecipeDragOver = useCallback(
+    (event: DragEvent<HTMLElement>) => {
+      if (!canDragReorder || !draggingRecipeId) {
+        return;
+      }
+      event.preventDefault();
+      event.dataTransfer.dropEffect = "move";
+    },
+    [canDragReorder, draggingRecipeId]
+  );
+
+  const handleRecipeDrop = useCallback(
+    (event: DragEvent<HTMLElement>, targetId: string) => {
+      if (
+        !canDragReorder ||
+        !draggingRecipeId ||
+        draggingRecipeId === targetId
+      ) {
+        return;
+      }
+      event.preventDefault();
+      const rect = event.currentTarget.getBoundingClientRect();
+      const placeAfter = event.clientY > rect.top + rect.height / 2;
+      reorderRelative(targetId, placeAfter);
+    },
+    [canDragReorder, draggingRecipeId, reorderRelative]
+  );
+
+  const handleRecipeListDrop = useCallback(
+    (event: DragEvent<HTMLDivElement>) => {
+      if (!canDragReorder || !draggingRecipeId) {
+        return;
+      }
+      if (event.target !== event.currentTarget) {
+        return;
+      }
+      event.preventDefault();
+      const fallbackTargetId =
+        libraryFilter === "favorites"
+          ? displayedRecipes[displayedRecipes.length - 1]?.id ?? null
+          : null;
+      reorderRelative(fallbackTargetId, true);
+    },
+    [
+      canDragReorder,
+      displayedRecipes,
+      draggingRecipeId,
+      libraryFilter,
+      reorderRelative,
+    ]
+  );
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-amber-50 via-rose-50 to-white px-4 py-12 text-slate-900">
@@ -795,7 +974,9 @@ export default function HomePage() {
                   }
                   className="mt-2 w-full rounded-2xl border border-slate-200 bg-white/70 px-4 py-3 text-base text-slate-900 outline-none transition focus:border-rose-400 focus:ring-4 focus:ring-rose-100"
                   rows={6}
-                  placeholder={"2 cups kale\n1 lemon\nHandful of walnuts"}
+                  placeholder={
+                    "2 limes\nSalt\n4 ears corn\n2 tablespoons unsalted butter\n1 tablespoon olive oil\n1 medium white onion\n2 cloves garlic\n3 tablespoons chopped epazote\n1/2 cup crumbled cotija cheese\n1/4 teaspoon chili powder\n12 small (6-inch) soft corn tortillas"
+                  }
                 />
               </label>
             </div>
@@ -846,7 +1027,7 @@ export default function HomePage() {
                         : "text-slate-500 hover:text-slate-900"
                     }`}
                   >
-                    All ({recipes.length})
+                    All ({orderedRecipes.length})
                   </button>
                   <button
                     type="button"
@@ -889,9 +1070,33 @@ export default function HomePage() {
                 >
                   Favorites first
                 </button>
+                <p className="text-xs text-slate-400">
+                  {canDragReorder
+                    ? libraryFilter === "favorites"
+                      ? "Drag any favorite to re-rank this view."
+                      : "Drag recipes to reorder your library."
+                    : effectiveSortMode !== "default"
+                    ? "Disable Favorites first to drag and drop recipes."
+                    : displayedRecipes.length <= 1
+                    ? "Add another recipe to unlock drag-and-drop ordering."
+                    : "Drag-to-reorder works in All or Favorites while using default sorting."}
+                </p>
               </div>
             </div>
-            <div className="mt-6 space-y-4">
+            <div
+              className="mt-6 space-y-4"
+              onDragOver={(event) => {
+                if (
+                  canDragReorder &&
+                  draggingRecipeId &&
+                  event.target === event.currentTarget
+                ) {
+                  event.preventDefault();
+                  event.dataTransfer.dropEffect = "move";
+                }
+              }}
+              onDrop={handleRecipeListDrop}
+            >
               {displayedRecipes.length === 0 ? (
                 <div className="rounded-2xl border border-dashed border-slate-200 bg-white/70 px-4 py-5 text-sm text-slate-500">
                   {libraryFilter === "favorites"
@@ -902,10 +1107,22 @@ export default function HomePage() {
                 displayedRecipes.map((recipe) => (
                   <article
                     key={recipe.id}
+                    draggable={canDragReorder}
+                    onDragStart={(event) => beginRecipeDrag(recipe.id, event)}
+                    onDragOver={handleRecipeDragOver}
+                    onDrop={(event) => handleRecipeDrop(event, recipe.id)}
+                    onDragEnd={finalizeRecipeDrag}
+                    aria-grabbed={draggingRecipeId === recipe.id}
                     className={`group relative rounded-2xl border p-5 shadow-sm transition hover:-translate-y-0.5 hover:shadow-lg ${
                       recipe.isFavorite
                         ? "border-rose-200 bg-rose-50/80 shadow-rose-100"
                         : "border-slate-100 bg-white/90 shadow-slate-100"
+                    } ${
+                      canDragReorder ? "cursor-grab active:cursor-grabbing" : ""
+                    } ${
+                      draggingRecipeId === recipe.id
+                        ? "opacity-70 ring-2 ring-rose-200"
+                        : ""
                     }`}
                   >
                     <div
