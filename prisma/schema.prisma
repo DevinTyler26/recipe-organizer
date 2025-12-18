@@ -8,17 +8,23 @@ datasource db {
 }
 
 model User {
-  id            String               @id @default(cuid())
-  name          String?
-  email         String?              @unique
-  emailVerified DateTime?
-  image         String?
-  accounts      Account[]
-  sessions      Session[]
-  recipes       Recipe[]
-  shoppingList  ShoppingListEntry[]
-  createdAt     DateTime             @default(now())
-  updatedAt     DateTime             @updatedAt
+  id                            String               @id @default(cuid())
+  name                          String?
+  email                         String?              @unique
+  emailVerified                 DateTime?
+  image                         String?
+  accounts                      Account[]
+  sessions                      Session[]
+  ownedRecipes                  Recipe[]             @relation("RecipeOwner")
+  recipesCreated                Recipe[]             @relation("RecipeCreatedBy")
+  recipesUpdated                Recipe[]             @relation("RecipeUpdatedBy")
+  ownedShoppingListEntries      ShoppingListEntry[]  @relation("ShoppingListOwner")
+  shoppingListEntriesCreated    ShoppingListEntry[]  @relation("ShoppingListCreatedBy")
+  shoppingListEntriesUpdated    ShoppingListEntry[]  @relation("ShoppingListUpdatedBy")
+  collaborationInvitationsSent  Collaboration[]      @relation("CollaborationOwner")
+  collaborationsAccepted        Collaboration[]      @relation("CollaborationCollaborator")
+  createdAt                     DateTime             @default(now())
+  updatedAt                     DateTime             @updatedAt
 }
 
 model Account {
@@ -58,7 +64,9 @@ model VerificationToken {
 
 model Recipe {
   id          String   @id @default(cuid())
-  userId      String
+  ownerId     String
+  createdById String
+  updatedById String
   title       String
   summary     String?
   ingredients String[]
@@ -68,15 +76,19 @@ model Recipe {
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
 
-  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  owner     User @relation("RecipeOwner", fields: [ownerId], references: [id], onDelete: Cascade)
+  createdBy User @relation("RecipeCreatedBy", fields: [createdById], references: [id], onDelete: Cascade)
+  updatedBy User @relation("RecipeUpdatedBy", fields: [updatedById], references: [id], onDelete: Cascade)
 
-  @@index([userId, sortOrder])
-  @@index([userId, createdAt])
+  @@index([ownerId, sortOrder])
+  @@index([ownerId, createdAt])
 }
 
 model ShoppingListEntry {
   id                String   @id @default(cuid())
-  userId            String
+  ownerId           String
+  createdById       String
+  updatedById       String
   label             String
   normalizedLabel   String
   quantityText      String
@@ -87,7 +99,33 @@ model ShoppingListEntry {
   createdAt         DateTime @default(now())
   sortOrder         Int      @default(0)
 
-  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  owner     User @relation("ShoppingListOwner", fields: [ownerId], references: [id], onDelete: Cascade)
+  createdBy User @relation("ShoppingListCreatedBy", fields: [createdById], references: [id], onDelete: Cascade)
+  updatedBy User @relation("ShoppingListUpdatedBy", fields: [updatedById], references: [id], onDelete: Cascade)
 
-  @@index([userId, normalizedLabel])
+  @@index([ownerId, normalizedLabel])
+}
+
+model Collaboration {
+  id              String                     @id @default(cuid())
+  resourceType    CollaborationResourceType
+  resourceId      String
+  ownerId         String
+  collaboratorId  String
+  createdAt       DateTime                   @default(now())
+  updatedAt       DateTime                   @updatedAt
+  invitedEmail    String
+  acceptedAt      DateTime?
+
+  owner        User @relation("CollaborationOwner", fields: [ownerId], references: [id], onDelete: Cascade)
+  collaborator User @relation("CollaborationCollaborator", fields: [collaboratorId], references: [id], onDelete: Cascade)
+
+  @@index([resourceType, resourceId])
+  @@index([collaboratorId])
+  @@unique([resourceType, resourceId, collaboratorId])
+}
+
+enum CollaborationResourceType {
+  RECIPE
+  SHOPPING_LIST
 }

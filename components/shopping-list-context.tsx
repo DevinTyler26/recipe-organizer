@@ -26,13 +26,35 @@ const STORAGE_KEY = "recipe-organizer-shopping-list";
 
 type ShoppingListContextValue = {
   items: ShoppingListItem[];
-  addItems: (items: IncomingIngredient[]) => void;
-  removeItem: (key: string) => void;
-  clearList: () => void;
-  reorderItems: (keys: string[]) => void;
+  lists: ShoppingListListMeta[];
+  selectedListId: string | null;
+  selectList: (ownerId: string) => void;
+  addItems: (items: IncomingIngredient[], ownerId?: string) => void;
+  removeItem: (key: string, ownerId?: string) => void;
+  clearList: (ownerId?: string) => void;
+  reorderItems: (keys: string[], ownerId?: string) => void;
+  updateQuantity: (
+    key: string,
+    quantityText: string,
+    ownerId?: string
+  ) => Promise<void>;
   totalItems: number;
   isSyncing: boolean;
   isRemote: boolean;
+};
+
+type OwnerListState = {
+  ownerId: string;
+  ownerLabel: string;
+  isSelf: boolean;
+  state: ShoppingListState;
+};
+
+export type ShoppingListListMeta = {
+  ownerId: string;
+  ownerLabel: string;
+  isSelf: boolean;
+  totalItems: number;
 };
 
 const ShoppingListContext = createContext<ShoppingListContextValue | null>(
@@ -65,46 +87,72 @@ const getNextOrderValue = (state: ShoppingListState) => {
   return orders.length ? Math.max(...orders) : -1;
 };
 
+const LOCAL_OWNER_ID = "local";
+const LOCAL_LIST_LABEL = "This device";
+
 export function ShoppingListProvider({ children }: { children: ReactNode }) {
-  const { status } = useSession();
+  const { data: session, status } = useSession();
   const isAuthenticated = status === "authenticated";
-  const [store, setStore] = useState<ShoppingListState>(() =>
+  const currentUserId = session?.user?.id ?? null;
+  const currentUserLabel =
+    session?.user?.name || session?.user?.email || "Your list";
+  const [localStore, setLocalStore] = useState<ShoppingListState>(() =>
     readStoredState()
   );
+  const [remoteLists, setRemoteLists] = useState<OwnerListState[]>([]);
   const [isRemote, setIsRemote] = useState(false);
   const [isSyncing, setIsSyncing] = useState(false);
+  const [selectedOwnerId, setSelectedOwnerId] = useState<string | null>(null);
 
-  const fetchRemoteState = useCallback(async () => {
+  const fetchRemoteLists = useCallback(async () => {
     const response = await fetch("/api/shopping-list", { cache: "no-store" });
     const body = (await response.json().catch(() => null)) as {
-      state?: ShoppingListState;
+      lists?: {
+        ownerId: string;
+        ownerLabel: string;
+        isSelf: boolean;
+        state: ShoppingListState;
+      }[];
       error?: string;
     } | null;
-    if (!response.ok || !body?.state) {
+    if (!response.ok || !Array.isArray(body?.lists)) {
       throw new Error(body?.error ?? "Failed to load shopping list");
     }
-    return reviveStore(body.state);
+    return body.lists.map((list) => ({
+      ownerId: list.ownerId,
+      ownerLabel: list.ownerLabel,
+      isSelf: list.isSelf,
+      state: reviveStore(list.state),
+    }));
   }, []);
 
   useEffect(() => {
     if (!isAuthenticated) {
       setIsRemote(false);
-      setStore(readStoredState());
+      setRemoteLists([]);
+      setLocalStore(readStoredState());
+      setSelectedOwnerId(LOCAL_OWNER_ID);
       return;
     }
 
     let cancelled = false;
     setIsSyncing(true);
-    fetchRemoteState()
-      .then((state) => {
-        if (!cancelled) {
-          setStore(state);
-          setIsRemote(true);
-        }
+    fetchRemoteLists()
+      .then((lists) => {
+        if (cancelled) return;
+        setRemoteLists(lists);
+        setIsRemote(true);
+        setSelectedOwnerId((current) => {
+          if (current && lists.some((list) => list.ownerId === current)) {
+            return current;
+          }
+          return lists[0]?.ownerId ?? currentUserId ?? current;
+        });
       })
       .catch((error) => {
         if (!cancelled) {
           console.error("Failed to fetch shopping list", error);
+          setIsRemote(false);
         }
       })
       .finally(() => {
@@ -116,15 +164,21 @@ export function ShoppingListProvider({ children }: { children: ReactNode }) {
     return () => {
       cancelled = true;
     };
-  }, [isAuthenticated, fetchRemoteState]);
+  }, [currentUserId, fetchRemoteLists, isAuthenticated]);
 
   useEffect(() => {
-    if (typeof window === "undefined" || isRemote) return;
-    window.localStorage.setItem(STORAGE_KEY, JSON.stringify(store));
-  }, [store, isRemote]);
+    if (typeof window === "undefined" || isAuthenticated) return;
+    window.localStorage.setItem(STORAGE_KEY, JSON.stringify(localStore));
+  }, [localStore, isAuthenticated]);
 
   const runRemoteMutation = useCallback(
     async (action: () => Promise<Response>) => {
+      if (!isAuthenticated) {
+        return {
+          success: false,
+          error: new Error("You need to sign in to sync this list"),
+        } as const;
+      }
       setIsSyncing(true);
       try {
         const response = await action();
@@ -134,23 +188,50 @@ export function ShoppingListProvider({ children }: { children: ReactNode }) {
           } | null;
           throw new Error(body?.error ?? "Shopping list request failed");
         }
-        const nextState = await fetchRemoteState();
-        setStore(nextState);
+        const nextLists = await fetchRemoteLists();
+        setRemoteLists(nextLists);
         setIsRemote(true);
+        setSelectedOwnerId((current) => {
+          if (current && nextLists.some((list) => list.ownerId === current)) {
+            return current;
+          }
+          return nextLists[0]?.ownerId ?? currentUserId ?? current;
+        });
+        return { success: true } as const;
       } catch (error) {
         console.error("Shopping list sync failed", error);
+        return {
+          success: false,
+          error:
+            error instanceof Error
+              ? error
+              : new Error("Shopping list sync failed"),
+        } as const;
       } finally {
         setIsSyncing(false);
       }
     },
-    [fetchRemoteState]
+    [currentUserId, fetchRemoteLists, isAuthenticated]
+  );
+
+  const resolveOwnerId = useCallback(
+    (override?: string | null) => {
+      if (!isAuthenticated) {
+        return LOCAL_OWNER_ID;
+      }
+      if (override && override.trim().length) {
+        return override.trim();
+      }
+      return selectedOwnerId ?? currentUserId ?? null;
+    },
+    [currentUserId, isAuthenticated, selectedOwnerId]
   );
 
   const addItems = useCallback(
-    (ingredients: IncomingIngredient[]) => {
+    (ingredients: IncomingIngredient[], ownerOverride?: string) => {
       if (!ingredients.length) return;
       if (!isAuthenticated) {
-        setStore((current) => {
+        setLocalStore((current) => {
           const next = { ...current } as ShoppingListState;
           let orderCursor = getNextOrderValue(next);
           ingredients.forEach(({ value, recipeId, recipeTitle }) => {
@@ -187,22 +268,28 @@ export function ShoppingListProvider({ children }: { children: ReactNode }) {
         return;
       }
 
+      const targetOwnerId = resolveOwnerId(ownerOverride);
+      if (!targetOwnerId) {
+        console.warn("No shopping list owner available for new items");
+        return;
+      }
+
       void runRemoteMutation(() =>
         fetch("/api/shopping-list", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ ingredients }),
+          body: JSON.stringify({ ingredients, ownerId: targetOwnerId }),
         })
       );
     },
-    [isAuthenticated, runRemoteMutation]
+    [isAuthenticated, resolveOwnerId, runRemoteMutation]
   );
 
   const removeItem = useCallback(
-    (key: string) => {
+    (key: string, ownerOverride?: string) => {
       if (!key) return;
       if (!isAuthenticated) {
-        setStore((current) => {
+        setLocalStore((current) => {
           if (!current[key]) return current;
           const next = { ...current };
           delete next[key];
@@ -211,115 +298,252 @@ export function ShoppingListProvider({ children }: { children: ReactNode }) {
         return;
       }
 
-      const url = `/api/shopping-list?label=${encodeURIComponent(key)}`;
-      void runRemoteMutation(() => fetch(url, { method: "DELETE" }));
+      const targetOwnerId = resolveOwnerId(ownerOverride);
+      if (!targetOwnerId) return;
+      const params = new URLSearchParams({
+        label: key,
+        ownerId: targetOwnerId,
+      });
+      void runRemoteMutation(() =>
+        fetch(`/api/shopping-list?${params.toString()}`, { method: "DELETE" })
+      );
     },
-    [isAuthenticated, runRemoteMutation]
+    [isAuthenticated, resolveOwnerId, runRemoteMutation]
   );
 
-  const clearList = useCallback(() => {
-    if (!isAuthenticated) {
-      setStore({});
-      return;
-    }
-    void runRemoteMutation(() =>
-      fetch("/api/shopping-list", { method: "DELETE" })
-    );
-  }, [isAuthenticated, runRemoteMutation]);
+  const clearList = useCallback(
+    (ownerOverride?: string) => {
+      if (!isAuthenticated) {
+        setLocalStore({});
+        return;
+      }
+
+      const targetOwnerId = resolveOwnerId(ownerOverride);
+      if (!targetOwnerId) return;
+      const params = new URLSearchParams({ ownerId: targetOwnerId });
+      void runRemoteMutation(() =>
+        fetch(`/api/shopping-list?${params.toString()}`, { method: "DELETE" })
+      );
+    },
+    [isAuthenticated, resolveOwnerId, runRemoteMutation]
+  );
 
   const reorderItems = useCallback(
-    (orderedKeys: string[]) => {
+    (orderedKeys: string[], ownerOverride?: string) => {
       if (!orderedKeys.length) return;
-      let didChange = false;
-      setStore((current) => {
-        const nextOrderSequence = (() => {
-          const provided = orderedKeys.filter((key) => current[key]);
-          const providedSet = new Set(provided);
-          const missing = Object.keys(current).filter(
-            (key) => !providedSet.has(key)
-          );
-          return [...provided, ...missing];
-        })();
 
-        if (nextOrderSequence.length === 0) {
-          return current;
+      if (!isAuthenticated) {
+        setLocalStore((current) => reorderState(current, orderedKeys));
+        return;
+      }
+
+      const targetOwnerId = resolveOwnerId(ownerOverride);
+      if (!targetOwnerId) return;
+
+      const targetList = remoteLists.find(
+        (list) => list.ownerId === targetOwnerId
+      );
+      if (targetList) {
+        const updatedState = reorderState(targetList.state, orderedKeys);
+        if (updatedState === targetList.state) {
+          return;
         }
+      }
 
-        const next = { ...current } as ShoppingListState;
-        let updated = false;
-        nextOrderSequence.forEach((key, index) => {
-          const record = current[key];
-          if (!record) return;
-          if (record.order !== index) {
-            next[key] = { ...record, order: index };
-            updated = true;
+      setRemoteLists((current) => {
+        let changed = false;
+        const next = current.map((list) => {
+          if (list.ownerId !== targetOwnerId) {
+            return list;
           }
+          const updatedState = reorderState(list.state, orderedKeys);
+          if (updatedState === list.state) {
+            return list;
+          }
+          changed = true;
+          return { ...list, state: updatedState };
         });
-        if (updated) {
-          didChange = true;
-        }
-        return updated ? next : current;
+        return changed ? next : current;
       });
 
-      if (isAuthenticated && didChange) {
-        void runRemoteMutation(() =>
-          fetch("/api/shopping-list", {
-            method: "PATCH",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ order: orderedKeys }),
-          })
-        );
-      }
+      void runRemoteMutation(() =>
+        fetch("/api/shopping-list", {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ order: orderedKeys, ownerId: targetOwnerId }),
+        })
+      );
     },
-    [isAuthenticated, runRemoteMutation]
+    [isAuthenticated, remoteLists, resolveOwnerId, runRemoteMutation]
   );
 
+  const updateItemQuantity = useCallback(
+    async (key: string, quantityText: string, ownerOverride?: string) => {
+      if (!key) {
+        throw new Error("Missing list item identifier");
+      }
+
+      if (!isAuthenticated) {
+        setLocalStore((current) =>
+          applyQuantityOverrideToState(current, key, quantityText)
+        );
+        return;
+      }
+
+      const targetOwnerId = resolveOwnerId(ownerOverride);
+      if (!targetOwnerId) {
+        throw new Error("Select a shopping list first");
+      }
+
+      const previousLists = remoteLists;
+      setRemoteLists((current) =>
+        current.map((list) => {
+          if (list.ownerId !== targetOwnerId) {
+            return list;
+          }
+          const nextState = applyQuantityOverrideToState(
+            list.state,
+            key,
+            quantityText
+          );
+          if (nextState === list.state) {
+            return list;
+          }
+          return { ...list, state: nextState };
+        })
+      );
+
+      const result = await runRemoteMutation(() =>
+        fetch("/api/shopping-list", {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            ownerId: targetOwnerId,
+            label: key,
+            quantity: quantityText,
+          }),
+        })
+      );
+
+      if (!result.success) {
+        setRemoteLists(previousLists);
+        throw result.error;
+      }
+    },
+    [isAuthenticated, remoteLists, resolveOwnerId, runRemoteMutation]
+  );
+
+  const resolvedLists = useMemo<OwnerListState[]>(() => {
+    if (isAuthenticated) {
+      if (isRemote) {
+        return remoteLists;
+      }
+      if (currentUserId) {
+        return [
+          {
+            ownerId: currentUserId,
+            ownerLabel: currentUserLabel,
+            isSelf: true,
+            state: {},
+          },
+        ];
+      }
+      return [];
+    }
+
+    return [
+      {
+        ownerId: LOCAL_OWNER_ID,
+        ownerLabel: LOCAL_LIST_LABEL,
+        isSelf: true,
+        state: localStore,
+      },
+    ];
+  }, [
+    currentUserId,
+    currentUserLabel,
+    isAuthenticated,
+    isRemote,
+    localStore,
+    remoteLists,
+  ]);
+
+  useEffect(() => {
+    if (!resolvedLists.length) return;
+    setSelectedOwnerId((current) => {
+      if (current && resolvedLists.some((list) => list.ownerId === current)) {
+        return current;
+      }
+      return resolvedLists[0].ownerId;
+    });
+  }, [resolvedLists]);
+
+  const activeList = useMemo(() => {
+    if (!resolvedLists.length) return null;
+    if (selectedOwnerId) {
+      const matching = resolvedLists.find(
+        (list) => list.ownerId === selectedOwnerId
+      );
+      if (matching) {
+        return matching;
+      }
+    }
+    return resolvedLists[0] ?? null;
+  }, [resolvedLists, selectedOwnerId]);
+
   const items = useMemo(() => {
-    return Object.entries(store)
-      .map(([key, record]) => ({
-        key,
-        label: record.label,
-        unitSummary: summarizeEntries(record.entries),
-        occurrences: record.entries.length,
-        sources: Array.from(
-          new Set(
-            record.entries
-              .map((entry) => entry.sourceRecipeTitle?.trim())
-              .filter((title): title is string => Boolean(title))
-          )
-        ),
-        order: record.order ?? 0,
-      }))
-      .sort((a, b) => {
-        if (a.order !== b.order) {
-          return a.order - b.order;
-        }
-        return a.label.localeCompare(b.label);
-      });
-  }, [store]);
+    if (!activeList) return [];
+    return mapStateToItems(activeList.state, activeList);
+  }, [activeList]);
+
+  const listsMeta = useMemo<ShoppingListListMeta[]>(() => {
+    return resolvedLists.map((list) => ({
+      ownerId: list.ownerId,
+      ownerLabel: list.ownerLabel,
+      isSelf: list.isSelf,
+      totalItems: Object.values(list.state).reduce(
+        (sum, record) => sum + record.entries.length,
+        0
+      ),
+    }));
+  }, [resolvedLists]);
 
   const totalItems = useMemo(
     () => items.reduce((sum, entry) => sum + entry.occurrences, 0),
     [items]
   );
 
+  const selectList = useCallback((ownerId: string) => {
+    setSelectedOwnerId(ownerId);
+  }, []);
+
+  const activeListId = activeList?.ownerId ?? selectedOwnerId ?? null;
+
   const value = useMemo(
     () => ({
       items,
+      lists: listsMeta,
+      selectedListId: activeListId,
+      selectList,
       addItems,
       removeItem,
       clearList,
       reorderItems,
+      updateQuantity: updateItemQuantity,
       totalItems,
       isSyncing,
       isRemote,
     }),
     [
       items,
+      listsMeta,
+      activeListId,
+      selectList,
       addItems,
       removeItem,
       clearList,
       reorderItems,
+      updateItemQuantity,
       totalItems,
       isSyncing,
       isRemote,
@@ -341,6 +565,108 @@ export function useShoppingList() {
     );
   }
   return context;
+}
+
+function mapStateToItems(
+  state: ShoppingListState,
+  meta: Pick<OwnerListState, "ownerId" | "ownerLabel" | "isSelf">
+): ShoppingListItem[] {
+  return Object.entries(state)
+    .map(([key, record]) => ({
+      id: `${meta.ownerId}:${key}`,
+      storageKey: key,
+      label: record.label,
+      unitSummary: summarizeEntries(record.entries),
+      occurrences: record.entries.length,
+      sources: Array.from(
+        new Set(
+          record.entries
+            .map((entry) => entry.sourceRecipeTitle?.trim())
+            .filter((title): title is string => Boolean(title))
+        )
+      ),
+      order: record.order ?? 0,
+      ownerId: meta.ownerId,
+      ownerLabel: meta.ownerLabel,
+      isSelf: meta.isSelf,
+    }))
+    .sort((a, b) => {
+      if (a.order !== b.order) {
+        return a.order - b.order;
+      }
+      return a.label.localeCompare(b.label);
+    });
+}
+
+function reorderState(
+  state: ShoppingListState,
+  orderedKeys: string[]
+): ShoppingListState {
+  if (!orderedKeys.length) {
+    return state;
+  }
+  const provided = orderedKeys.filter((key) => state[key]);
+  const providedSet = new Set(provided);
+  const missing = Object.keys(state).filter((key) => !providedSet.has(key));
+  const nextOrderSequence = [...provided, ...missing];
+  if (!nextOrderSequence.length) {
+    return state;
+  }
+  let updated = false;
+  const next: ShoppingListState = { ...state };
+  nextOrderSequence.forEach((key, index) => {
+    const record = state[key];
+    if (!record) return;
+    if ((record.order ?? 0) !== index) {
+      next[key] = { ...record, order: index };
+      updated = true;
+    }
+  });
+  return updated ? next : state;
+}
+
+function applyQuantityOverrideToState(
+  state: ShoppingListState,
+  key: string,
+  quantityText: string
+): ShoppingListState {
+  const record = state[key];
+  if (!record) {
+    return state;
+  }
+  const manualEntry = buildManualQuantityEntry(record.label, quantityText);
+  if (
+    record.entries.length === 1 &&
+    record.entries[0].quantityText === manualEntry.quantityText &&
+    record.entries[0].amountValue === manualEntry.amountValue &&
+    record.entries[0].measureText === manualEntry.measureText
+  ) {
+    return state;
+  }
+  return {
+    ...state,
+    [key]: {
+      ...record,
+      entries: [manualEntry],
+    },
+  };
+}
+
+function buildManualQuantityEntry(
+  label: string,
+  quantityText: string
+): QuantityEntry {
+  const trimmed = quantityText.trim();
+  const parsed = parseIngredient(
+    trimmed ? `${trimmed} ${label}`.trim() : label
+  );
+  return {
+    id: createId(),
+    quantityText: trimmed || "As listed",
+    amountValue: trimmed && parsed.quantityText ? parsed.amountValue : null,
+    measureText: parsed.measureText,
+    sourceRecipeTitle: "Manual adjustment",
+  };
 }
 
 function reviveStore(value: unknown): ShoppingListState {

@@ -21,7 +21,7 @@ export async function POST(request: Request) {
   }
 
   const recipes = await prisma.recipe.findMany({
-    where: { userId: user.id },
+    where: { ownerId: user.id },
     select: { id: true },
     orderBy: [
       { sortOrder: "asc" },
@@ -54,8 +54,8 @@ export async function POST(request: Request) {
   await prisma.$transaction(
     finalOrder.map((id, index) =>
       prisma.recipe.updateMany({
-        where: { id, userId: user.id },
-        data: { sortOrder: index },
+        where: { id, ownerId: user.id },
+        data: { sortOrder: index, updatedById: user.id },
       })
     )
   );
