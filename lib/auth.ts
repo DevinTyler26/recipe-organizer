@@ -16,6 +16,20 @@ export const authOptions = {
     }),
   ],
   callbacks: {
+    async signIn({ user }) {
+      const email = user.email?.trim().toLowerCase();
+      if (!email) {
+        return false;
+      }
+
+      const allowed = await prisma.allowedEmail.findUnique({ where: { email } });
+      if (!allowed) {
+        console.warn(`Blocked sign-in attempt for unauthorized email: ${email}`);
+        return false;
+      }
+
+      return true;
+    },
     session({ session, token }: { session: Session; token: JWT }) {
       if (session.user && token.sub) {
         session.user.id = token.sub;
