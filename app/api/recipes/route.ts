@@ -1,6 +1,13 @@
 import { NextResponse } from "next/server";
+import { Prisma } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
 import { getCurrentUser } from "@/lib/auth";
+import {
+  getRecipeAccessibleToUser,
+  getSharedRecipeIds,
+} from "@/lib/collaboration";
+
+const ownerSelect = { id: true, name: true, email: true } as const;
 
 export async function GET() {
   const user = await getCurrentUser();
@@ -8,12 +15,22 @@ export async function GET() {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
 
+  const sharedRecipeIds = await getSharedRecipeIds(user.id);
+  const visibilityFilters: Prisma.RecipeWhereInput[] = [{ ownerId: user.id }];
+  if (sharedRecipeIds.length) {
+    visibilityFilters.push({ id: { in: sharedRecipeIds } });
+  }
+
   const recipes = await prisma.recipe.findMany({
-    where: { userId: user.id },
+    where:
+      visibilityFilters.length === 1
+        ? visibilityFilters[0]
+        : { OR: visibilityFilters },
     orderBy: [
       { sortOrder: "asc" },
       { createdAt: "asc" },
     ],
+    include: { owner: { select: ownerSelect } },
   });
 
   return NextResponse.json({ recipes });
@@ -65,7 +82,7 @@ export async function POST(request: Request) {
 
   try {
     const lowestOrder = await prisma.recipe.aggregate({
-      where: { userId: user.id },
+      where: { ownerId: user.id },
       _min: { sortOrder: true },
     });
     const nextSortOrder =
@@ -75,7 +92,9 @@ export async function POST(request: Request) {
 
     const recipe = await prisma.recipe.create({
       data: {
-        userId: user.id,
+        ownerId: user.id,
+        createdById: user.id,
+        updatedById: user.id,
         title: title.trim(),
         summary:
           typeof summary === "string" && summary.trim().length
@@ -85,6 +104,7 @@ export async function POST(request: Request) {
         tags: normalizedTags,
         sortOrder: nextSortOrder,
       },
+      include: { owner: { select: ownerSelect } },
     });
     return NextResponse.json({ recipe }, { status: 201 });
   } catch (error) {
@@ -141,8 +161,13 @@ export async function PUT(request: Request) {
   }
 
   try {
-    const update = await prisma.recipe.updateMany({
-      where: { id, userId: user.id },
+    const recipe = await getRecipeAccessibleToUser(user.id, id);
+    if (!recipe) {
+      return NextResponse.json({ error: "Recipe not found" }, { status: 404 });
+    }
+
+    const updatedRecipe = await prisma.recipe.update({
+      where: { id: recipe.id },
       data: {
         title: title.trim(),
         summary:
@@ -151,18 +176,12 @@ export async function PUT(request: Request) {
             : null,
         ingredients,
         tags: normalizedTags,
+        updatedById: user.id,
       },
+      include: { owner: { select: ownerSelect } },
     });
 
-    if (update.count === 0) {
-      return NextResponse.json({ error: "Recipe not found" }, { status: 404 });
-    }
-
-    const recipe = await prisma.recipe.findFirst({
-      where: { id, userId: user.id },
-    });
-
-    return NextResponse.json({ recipe });
+    return NextResponse.json({ recipe: updatedRecipe });
   } catch (error) {
     console.error("Failed to update recipe", error);
     return NextResponse.json({ error: "Failed to update recipe" }, { status: 500 });
@@ -197,20 +216,18 @@ export async function PATCH(request: Request) {
     );
   }
 
-  const update = await prisma.recipe.updateMany({
-    where: { id, userId: user.id },
-    data: { isFavorite },
-  });
-
-  if (update.count === 0) {
+  const recipe = await getRecipeAccessibleToUser(user.id, id);
+  if (!recipe) {
     return NextResponse.json({ error: "Recipe not found" }, { status: 404 });
   }
 
-  const recipe = await prisma.recipe.findFirst({
-    where: { id, userId: user.id },
+  const updatedRecipe = await prisma.recipe.update({
+    where: { id: recipe.id },
+    data: { isFavorite, updatedById: user.id },
+    include: { owner: { select: ownerSelect } },
   });
 
-  return NextResponse.json({ recipe });
+  return NextResponse.json({ recipe: updatedRecipe });
 }
 
 export async function DELETE(request: Request) {
@@ -233,13 +250,12 @@ export async function DELETE(request: Request) {
   }
 
   try {
-    const result = await prisma.recipe.deleteMany({
-      where: { id, userId: user.id },
-    });
-
-    if (result.count === 0) {
+    const recipe = await getRecipeAccessibleToUser(user.id, id);
+    if (!recipe) {
       return NextResponse.json({ error: "Recipe not found" }, { status: 404 });
     }
+
+    await prisma.recipe.delete({ where: { id: recipe.id } });
 
     return NextResponse.json({ success: true });
   } catch (error) {

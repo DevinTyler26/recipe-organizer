@@ -8,6 +8,10 @@ import {
   parseIngredient,
 } from "@/lib/shopping-list";
 import { getCurrentUser } from "@/lib/auth";
+import {
+  canAccessShoppingListOwner,
+  getSharedShoppingListOwnerIds,
+} from "@/lib/collaboration";
 
 export async function GET() {
   const user = await getCurrentUser();
@@ -15,15 +19,32 @@ export async function GET() {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
 
+  const sharedOwnerIds = await getSharedShoppingListOwnerIds(user.id);
+  const ownerScope = Array.from(new Set([user.id, ...sharedOwnerIds]));
+
   const entries = await prisma.shoppingListEntry.findMany({
-    where: { userId: user.id },
+    where: { ownerId: { in: ownerScope } },
     orderBy: [{ sortOrder: "asc" }, { createdAt: "asc" }],
   });
 
-  const grouped: ShoppingListState = {};
+  const ownerRecords = await prisma.user.findMany({
+    where: { id: { in: ownerScope } },
+    select: { id: true, name: true, email: true },
+  });
+  const ownerLookup = new Map(ownerRecords.map((record) => [record.id, record]));
+
+  const groupedByOwner: Record<string, ShoppingListState> = {};
+  const ensureOwnerState = (ownerId: string) => {
+    if (!groupedByOwner[ownerId]) {
+      groupedByOwner[ownerId] = {};
+    }
+    return groupedByOwner[ownerId];
+  };
+
   entries.forEach((entry) => {
+    const ownerState = ensureOwnerState(entry.ownerId);
     const key = entry.normalizedLabel;
-    const record = grouped[key];
+    const record = ownerState[key];
     const quantityEntry: QuantityEntry = {
       id: entry.id,
       quantityText: entry.quantityText,
@@ -36,7 +57,7 @@ export async function GET() {
       record.entries.push(quantityEntry);
       record.order = Math.min(record.order, entry.sortOrder ?? 0);
     } else {
-      grouped[key] = {
+      ownerState[key] = {
         label: entry.label,
         entries: [quantityEntry],
         order: entry.sortOrder ?? 0,
@@ -44,7 +65,19 @@ export async function GET() {
     }
   });
 
-  return NextResponse.json({ state: grouped });
+  const lists = ownerScope.map((ownerId) => {
+    const ownerRecord = ownerLookup.get(ownerId);
+    const fallbackLabel = ownerId === user.id ? "Your list" : "Shared list";
+    const ownerLabel = ownerRecord?.name || ownerRecord?.email || fallbackLabel;
+    return {
+      ownerId,
+      ownerLabel,
+      isSelf: ownerId === user.id,
+      state: groupedByOwner[ownerId] ?? {},
+    };
+  });
+
+  return NextResponse.json({ lists });
 }
 
 export async function POST(request: Request) {
@@ -60,9 +93,20 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: "Invalid JSON" }, { status: 400 });
   }
 
-  const { ingredients } = (payload ?? {}) as {
+  const { ingredients, ownerId } = (payload ?? {}) as {
     ingredients?: unknown;
+    ownerId?: unknown;
   };
+
+  const targetOwnerId =
+    typeof ownerId === "string" && ownerId.trim().length
+      ? ownerId.trim()
+      : user.id;
+
+  const hasAccess = await canAccessShoppingListOwner(user.id, targetOwnerId);
+  if (!hasAccess) {
+    return NextResponse.json({ error: "Forbidden" }, { status: 403 });
+  }
 
   if (!Array.isArray(ingredients)) {
     return NextResponse.json(
@@ -97,7 +141,7 @@ export async function POST(request: Request) {
 
   const existingOrders = uniqueLabels.length
     ? await prisma.shoppingListEntry.findMany({
-        where: { userId: user.id, normalizedLabel: { in: uniqueLabels } },
+      where: { ownerId: targetOwnerId, normalizedLabel: { in: uniqueLabels } },
         select: { normalizedLabel: true, sortOrder: true },
         orderBy: { sortOrder: "asc" },
       })
@@ -111,7 +155,7 @@ export async function POST(request: Request) {
   });
 
   const maxOrderAggregate = await prisma.shoppingListEntry.aggregate({
-    where: { userId: user.id },
+    where: { ownerId: targetOwnerId },
     _max: { sortOrder: true },
   });
   let orderCursor = maxOrderAggregate._max.sortOrder ?? -1;
@@ -124,7 +168,9 @@ export async function POST(request: Request) {
   });
 
   const entriesToCreate = parsedEntries.map(({ parsed, meta }) => ({
-    userId: user.id,
+    ownerId: targetOwnerId,
+    createdById: user.id,
+    updatedById: user.id,
     label: parsed.label,
     normalizedLabel: parsed.normalizedLabel,
     quantityText: parsed.quantityText || "As listed",
@@ -155,6 +201,12 @@ export async function DELETE(request: Request) {
 
   const { searchParams } = new URL(request.url);
   const labelParam = searchParams.get("label");
+  const ownerParam = searchParams.get("ownerId");
+  const targetOwnerId = ownerParam?.trim()?.length ? ownerParam.trim() : user.id;
+  const hasAccess = await canAccessShoppingListOwner(user.id, targetOwnerId);
+  if (!hasAccess) {
+    return NextResponse.json({ error: "Forbidden" }, { status: 403 });
+  }
   const normalizedLabel = labelParam
     ? (() => {
         const parsed = parseIngredient(labelParam);
@@ -165,16 +217,106 @@ export async function DELETE(request: Request) {
   try {
     if (normalizedLabel) {
       await prisma.shoppingListEntry.deleteMany({
-        where: { userId: user.id, normalizedLabel },
+        where: { ownerId: targetOwnerId, normalizedLabel },
       });
     } else {
-      await prisma.shoppingListEntry.deleteMany({ where: { userId: user.id } });
+      await prisma.shoppingListEntry.deleteMany({ where: { ownerId: targetOwnerId } });
     }
     return NextResponse.json({ success: true });
   } catch (error) {
     console.error("Failed to delete shopping list entries", error);
     return NextResponse.json(
       { error: "Failed to delete shopping list entries" },
+      { status: 500 }
+    );
+  }
+}
+
+export async function PUT(request: Request) {
+  const user = await getCurrentUser();
+  if (!user) {
+    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  }
+
+  let payload: unknown;
+  try {
+    payload = await request.json();
+  } catch {
+    return NextResponse.json({ error: "Invalid JSON" }, { status: 400 });
+  }
+
+  const { ownerId, label, quantity } = (payload ?? {}) as {
+    ownerId?: unknown;
+    label?: unknown;
+    quantity?: unknown;
+  };
+
+  if (typeof label !== "string" || !label.trim()) {
+    return NextResponse.json(
+      { error: "label is required" },
+      { status: 400 }
+    );
+  }
+
+  const targetOwnerId =
+    typeof ownerId === "string" && ownerId.trim().length
+      ? ownerId.trim()
+      : user.id;
+  const hasAccess = await canAccessShoppingListOwner(user.id, targetOwnerId);
+  if (!hasAccess) {
+    return NextResponse.json({ error: "Forbidden" }, { status: 403 });
+  }
+
+  const normalizedLabel = normalizeLabel(label);
+  const existingEntries = await prisma.shoppingListEntry.findMany({
+    where: { ownerId: targetOwnerId, normalizedLabel },
+    orderBy: [{ sortOrder: "asc" }, { createdAt: "asc" }],
+  });
+
+  if (!existingEntries.length) {
+    return NextResponse.json({ error: "Item not found" }, { status: 404 });
+  }
+
+  const baseLabel = existingEntries[0].label;
+  const sortOrder = existingEntries.reduce((minimum, entry) => {
+    if (typeof entry.sortOrder === "number") {
+      return Math.min(minimum, entry.sortOrder);
+    }
+    return minimum;
+  }, existingEntries[0].sortOrder ?? 0);
+
+  const quantityText = typeof quantity === "string" ? quantity.trim() : "";
+  const parsed = parseIngredient(
+    quantityText ? `${quantityText} ${baseLabel}`.trim() : baseLabel
+  );
+
+  try {
+    await prisma.$transaction([
+      prisma.shoppingListEntry.deleteMany({
+        where: { ownerId: targetOwnerId, normalizedLabel },
+      }),
+      prisma.shoppingListEntry.create({
+        data: {
+          ownerId: targetOwnerId,
+          createdById: user.id,
+          updatedById: user.id,
+          label: baseLabel,
+          normalizedLabel,
+          quantityText: quantityText || "As listed",
+          amountValue:
+            quantityText && parsed.quantityText ? parsed.amountValue : null,
+          measureText: parsed.measureText || null,
+          sourceRecipeId: null,
+          sourceRecipeTitle: "Manual adjustment",
+          sortOrder,
+        },
+      }),
+    ]);
+    return NextResponse.json({ success: true });
+  } catch (error) {
+    console.error("Failed to update shopping list quantity", error);
+    return NextResponse.json(
+      { error: "Failed to update quantity" },
       { status: 500 }
     );
   }
@@ -193,12 +335,24 @@ export async function PATCH(request: Request) {
     return NextResponse.json({ error: "Invalid JSON" }, { status: 400 });
   }
 
-  const { order } = (payload ?? {}) as { order?: unknown };
+  const { order, ownerId } = (payload ?? {}) as {
+    order?: unknown;
+    ownerId?: unknown;
+  };
   if (!Array.isArray(order) || order.some((item) => typeof item !== "string")) {
     return NextResponse.json(
       { error: "order must be an array of labels" },
       { status: 400 }
     );
+  }
+
+  const targetOwnerId =
+    typeof ownerId === "string" && ownerId.trim().length
+      ? ownerId.trim()
+      : user.id;
+  const hasAccess = await canAccessShoppingListOwner(user.id, targetOwnerId);
+  if (!hasAccess) {
+    return NextResponse.json({ error: "Forbidden" }, { status: 403 });
   }
 
   const normalizedOrder = order
@@ -226,8 +380,8 @@ export async function PATCH(request: Request) {
     await prisma.$transaction(
       deduped.map((label, index) =>
         prisma.shoppingListEntry.updateMany({
-          where: { userId: user.id, normalizedLabel: label },
-          data: { sortOrder: index },
+          where: { ownerId: targetOwnerId, normalizedLabel: label },
+          data: { sortOrder: index, updatedById: user.id },
         })
       )
     );

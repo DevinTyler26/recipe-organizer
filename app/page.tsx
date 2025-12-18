@@ -5,12 +5,19 @@ import {
   useCallback,
   useEffect,
   useMemo,
+  useRef,
   useState,
   type DragEvent,
   type FormEvent,
 } from "react";
 import { signIn, signOut, useSession } from "next-auth/react";
 import { useShoppingList } from "@/components/shopping-list-context";
+import { CollaborationInviteDialog } from "@/components/collaboration-invite-dialog";
+import { CollaboratorRosterDialog } from "@/components/collaborator-roster-dialog";
+import type {
+  CollaborationRoster,
+  CollaboratorSummary,
+} from "@/types/collaboration";
 
 type ToastTone = "success" | "info" | "error";
 
@@ -19,6 +26,11 @@ type ToastMessage = {
   message: string;
   tone: ToastTone;
 };
+type RecipeOwner = {
+  id: string;
+  name: string | null;
+  email: string | null;
+} | null;
 type Recipe = {
   id: string;
   title: string;
@@ -27,12 +39,21 @@ type Recipe = {
   tags: string[];
   isFavorite: boolean;
   order: number;
+  owner: RecipeOwner;
+};
+
+type InviteTarget = {
+  resourceType: "RECIPE" | "SHOPPING_LIST";
+  resourceId: string;
+  resourceLabel: string;
+  description?: string;
 };
 
 type StoredRecipe = Omit<Recipe, "tags" | "order"> & {
   tags?: string[];
   order?: number;
   sortOrder?: number;
+  owner?: RecipeOwner;
 };
 
 const toastToneStyles: Record<ToastTone, string> = {
@@ -61,6 +82,7 @@ const starterRecipes: Recipe[] = [
     tags: ["Vegetarian", "Make-ahead"],
     isFavorite: true,
     order: 0,
+    owner: null,
   },
   {
     id: "starter-sheet-pan-gnocchi",
@@ -79,6 +101,7 @@ const starterRecipes: Recipe[] = [
     tags: ["Weeknight", "Sheet pan"],
     isFavorite: false,
     order: 1,
+    owner: null,
   },
   {
     id: "starter-midnight-brownies",
@@ -96,6 +119,7 @@ const starterRecipes: Recipe[] = [
     tags: ["Dessert", "Crowd-pleaser"],
     isFavorite: false,
     order: 2,
+    owner: null,
   },
 ];
 
@@ -143,6 +167,27 @@ const parseTagsInput = (value: string) => dedupeTags(value.split(/,|\n/));
 const ensureTagsArray = (tags?: string[]) =>
   dedupeTags(Array.isArray(tags) ? tags : []);
 
+const normalizeRecipeOwner = (owner: StoredRecipe["owner"]): RecipeOwner => {
+  if (!owner || typeof owner !== "object") {
+    return null;
+  }
+  const candidate = owner as { id?: unknown; name?: unknown; email?: unknown };
+  if (typeof candidate.id !== "string") {
+    return null;
+  }
+  return {
+    id: candidate.id,
+    name:
+      typeof candidate.name === "string" && candidate.name.trim().length
+        ? candidate.name
+        : null,
+    email:
+      typeof candidate.email === "string" && candidate.email.trim().length
+        ? candidate.email
+        : null,
+  };
+};
+
 const normalizeRecipe = (recipe: StoredRecipe): Recipe => {
   const normalizedOrder =
     typeof recipe.order === "number"
@@ -155,6 +200,7 @@ const normalizeRecipe = (recipe: StoredRecipe): Recipe => {
     ...recipe,
     order: normalizedOrder,
     tags: ensureTagsArray(recipe.tags),
+    owner: normalizeRecipeOwner(recipe.owner),
   };
 };
 
@@ -164,7 +210,8 @@ const normalizeRecipeList = (list?: StoredRecipe[] | null) =>
     : [];
 
 export default function HomePage() {
-  const { addItems, totalItems } = useShoppingList();
+  const { addItems, totalItems, lists, selectedListId, selectList } =
+    useShoppingList();
   const { data: session, status } = useSession();
   const isAuthenticated = status === "authenticated";
   const isSessionLoading = status === "loading";
@@ -192,11 +239,82 @@ export default function HomePage() {
   const [sortPreferenceLoaded, setSortPreferenceLoaded] = useState(false);
   const [draggingRecipeId, setDraggingRecipeId] = useState<string | null>(null);
   const [hasHydrated, setHasHydrated] = useState(false);
+  const [inviteTarget, setInviteTarget] = useState<InviteTarget | null>(null);
+  const [collaborationRoster, setCollaborationRoster] =
+    useState<CollaborationRoster | null>(null);
+  const [isCollaborationsLoading, setIsCollaborationsLoading] = useState(false);
+  const [isListMenuOpen, setIsListMenuOpen] = useState(false);
+  const [rosterModal, setRosterModal] = useState<{
+    title: string;
+    collaborators: CollaboratorSummary[];
+  } | null>(null);
+  const listMenuRef = useRef<HTMLDivElement | null>(null);
+  const currentUserId = session?.user?.id ?? null;
   const accountLabel = session?.user?.name || session?.user?.email || "Account";
   const orderedRecipes = useMemo(
     () => [...recipes].sort((a, b) => a.order - b.order),
     [recipes]
   );
+  const activeShoppingList = useMemo(() => {
+    if (!lists.length) return null;
+    if (selectedListId) {
+      const selected = lists.find((list) => list.ownerId === selectedListId);
+      if (selected) {
+        return selected;
+      }
+    }
+    return lists[0] ?? null;
+  }, [lists, selectedListId]);
+  const shoppingListDestinationLabel =
+    activeShoppingList?.ownerLabel ??
+    (isAuthenticated ? "your list" : "this device");
+  const canShareShoppingList = Boolean(
+    isAuthenticated && activeShoppingList?.isSelf && currentUserId
+  );
+  const recipeCollaboratorLookup = useMemo(() => {
+    const map = new Map<string, CollaboratorSummary[]>();
+    collaborationRoster?.recipes.forEach((entry) => {
+      map.set(entry.resourceId, entry.collaborators);
+    });
+    return map;
+  }, [collaborationRoster]);
+  const shoppingListCollaborators = useMemo(() => {
+    if (
+      !collaborationRoster?.shoppingList ||
+      collaborationRoster.shoppingList.ownerId !== currentUserId
+    ) {
+      return [];
+    }
+    return collaborationRoster.shoppingList.collaborators;
+  }, [collaborationRoster, currentUserId]);
+
+  const refreshCollaborations = useCallback(async () => {
+    if (!isAuthenticated) {
+      setCollaborationRoster(null);
+      return;
+    }
+    setIsCollaborationsLoading(true);
+    try {
+      const response = await fetch("/api/collaborations", {
+        cache: "no-store",
+      });
+      const body = (await response.json().catch(() => null)) as
+        | CollaborationRoster
+        | { error?: string }
+        | null;
+      if (!response.ok || !body || ("error" in body && body.error)) {
+        throw new Error(body && "error" in body ? body.error : undefined);
+      }
+      if ("error" in body) {
+        throw new Error(body.error);
+      }
+      setCollaborationRoster(body as CollaborationRoster);
+    } catch (error) {
+      console.error("Failed to load collaboration roster", error);
+    } finally {
+      setIsCollaborationsLoading(false);
+    }
+  }, [isAuthenticated]);
 
   const showToast = useCallback(
     (message: string, tone: ToastTone = "success") => {
@@ -206,6 +324,33 @@ export default function HomePage() {
       ]);
     },
     []
+  );
+
+  const handleInviteSubmit = useCallback(
+    async (email: string) => {
+      const target = inviteTarget;
+      if (!target) {
+        throw new Error("Select something to share first");
+      }
+      const response = await fetch("/api/collaborations", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          resourceType: target.resourceType,
+          resourceId: target.resourceId,
+          email,
+        }),
+      });
+      const body = (await response.json().catch(() => null)) as {
+        error?: string;
+      } | null;
+      if (!response.ok) {
+        throw new Error(body?.error ?? "Failed to send invite");
+      }
+      showToast(`Shared ${target.resourceLabel} with ${email}.`);
+      void refreshCollaborations();
+    },
+    [inviteTarget, refreshCollaborations, showToast]
   );
 
   const persistRecipeOrder = useCallback(
@@ -244,6 +389,30 @@ export default function HomePage() {
   useEffect(() => {
     setHasHydrated(true);
   }, []);
+
+  useEffect(() => {
+    if (!isListMenuOpen) {
+      return;
+    }
+    const handleClick = (event: MouseEvent) => {
+      if (!listMenuRef.current?.contains(event.target as Node)) {
+        setIsListMenuOpen(false);
+      }
+    };
+    document.addEventListener("mousedown", handleClick);
+    return () => document.removeEventListener("mousedown", handleClick);
+  }, [isListMenuOpen]);
+
+  const openRosterDialog = useCallback(
+    (title: string, collaborators: CollaboratorSummary[]) => {
+      setRosterModal({ title, collaborators });
+    },
+    []
+  );
+
+  useEffect(() => {
+    void refreshCollaborations();
+  }, [isAuthenticated, refreshCollaborations]);
 
   useEffect(() => {
     if (!isAuthenticated) {
@@ -460,6 +629,7 @@ export default function HomePage() {
         tags,
         isFavorite: false,
         order: nextLocalOrder,
+        owner: null,
       };
       setRecipes((current) => [newRecipe, ...current]);
       resetFormState();
@@ -503,7 +673,12 @@ export default function HomePage() {
         recipeTitle: recipe.title,
       }))
     );
-    showToast(`${recipe.title} ingredients now live in your shopping list.`);
+    const destinationLabel = activeShoppingList
+      ? activeShoppingList.isSelf
+        ? "your shopping list"
+        : `${activeShoppingList.ownerLabel}'s list`
+      : "your shopping list";
+    showToast(`${recipe.title} ingredients now live in ${destinationLabel}.`);
   };
 
   const handleToggleFavorite = async (recipe: Recipe) => {
@@ -840,63 +1015,186 @@ export default function HomePage() {
     <div className="min-h-screen bg-gradient-to-br from-amber-50 via-rose-50 to-white px-4 py-12 text-slate-900">
       <main className="mx-auto flex w-full max-w-5xl flex-col gap-12">
         <header className="rounded-3xl border border-white/60 bg-white/85 p-8 shadow-xl shadow-rose-100/60 backdrop-blur">
-          <div className="flex flex-col gap-6 lg:flex-row lg:items-end lg:justify-between">
-            <div className="space-y-2">
-              <p className="text-sm font-semibold uppercase tracking-[0.3em] text-rose-500">
+          <nav className="flex flex-wrap items-center justify-between gap-4 border-b border-white/60 pb-4">
+            <div>
+              <p className="text-xs font-semibold uppercase tracking-[0.35em] text-rose-500">
                 Recipe Organizer
               </p>
-              <h1 className="text-4xl font-semibold leading-tight text-slate-900 sm:text-5xl">
-                Build dinners, snacks, and a synced shopping list.
-              </h1>
-              <p className="max-w-2xl text-lg text-slate-600">
-                Drop the recipes you love, tag every ingredient, and dispatch
-                the entire pantry plan to your shopping list in one tap.
+              <p className="mt-1 text-lg font-semibold text-slate-900">
+                {isAuthenticated ? accountLabel : "Guest mode"}
               </p>
             </div>
-            <div className="space-y-3 rounded-3xl border border-white/70 bg-white/80 p-6 text-sm text-slate-600 shadow-lg shadow-white/60">
-              <div>
-                <p className="text-xs font-semibold uppercase tracking-[0.35em] text-amber-500">
-                  {isAuthenticated ? "Signed in" : "Guest mode"}
-                </p>
-                <p className="mt-1 text-lg font-semibold text-slate-900">
-                  {isAuthenticated
-                    ? accountLabel
-                    : "Sign in to sync recipes across devices"}
-                </p>
-              </div>
-              <div className="flex flex-wrap gap-3">
-                <button
-                  type="button"
-                  disabled={isSessionLoading}
-                  onClick={() => {
-                    if (isAuthenticated) {
-                      void signOut();
-                    } else {
-                      void signIn("google");
-                    }
-                  }}
-                  className="inline-flex flex-1 items-center justify-center rounded-2xl border border-slate-200 bg-white/70 px-4 py-2 font-semibold text-slate-700 shadow-inner shadow-white/60 transition hover:border-slate-300 disabled:cursor-not-allowed disabled:opacity-70"
-                >
-                  {isAuthenticated ? "Sign out" : "Sign in with Google"}
-                </button>
-                <Link
-                  href="/shopping-list"
-                  className="inline-flex flex-1 items-center justify-center rounded-2xl bg-slate-900 px-4 py-2 font-semibold text-white shadow-lg shadow-slate-900/20 transition hover:-translate-y-0.5"
-                >
-                  View Shopping List ({shoppingListTotal})
-                </Link>
-              </div>
+            <div className="flex flex-wrap items-center gap-3">
+              {lists.length > 0 && (
+                <div className="relative" ref={listMenuRef}>
+                  <button
+                    type="button"
+                    aria-haspopup="menu"
+                    aria-expanded={isListMenuOpen}
+                    onClick={() => setIsListMenuOpen((current) => !current)}
+                    className="inline-flex items-center gap-3 rounded-2xl border border-slate-200 bg-white/70 px-4 py-2 text-left text-sm font-semibold text-slate-700 shadow-inner shadow-white/60 transition hover:border-slate-300"
+                  >
+                    <span className="flex flex-col leading-tight">
+                      <span className="text-[10px] font-semibold uppercase tracking-[0.35em] text-slate-400">
+                        Active list
+                      </span>
+                      <span className="text-slate-900">
+                        {shoppingListDestinationLabel}
+                      </span>
+                    </span>
+                    <svg
+                      className={`h-4 w-4 text-slate-500 transition ${
+                        isListMenuOpen ? "rotate-180" : ""
+                      }`}
+                      viewBox="0 0 20 20"
+                      fill="currentColor"
+                      aria-hidden="true"
+                    >
+                      <path d="M5.23 7.21a.75.75 0 0 1 1.06.02L10 10.585l3.71-3.355a.75.75 0 0 1 1.02 1.1l-4.23 3.83a.75.75 0 0 1-1.02 0l-4.23-3.83a.75.75 0 0 1 .02-1.1z" />
+                    </svg>
+                  </button>
+                  {isListMenuOpen && (
+                    <div className="absolute right-0 z-20 mt-3 w-72 rounded-3xl border border-slate-100 bg-white/95 p-4 text-sm text-slate-600 shadow-2xl shadow-slate-200/80">
+                      {activeShoppingList ? (
+                        <>
+                          <p className="text-base font-semibold text-slate-900">
+                            {shoppingListDestinationLabel}
+                          </p>
+                          <p className="text-xs text-slate-500">
+                            {activeShoppingList.isSelf
+                              ? "Owned by you"
+                              : `Shared from ${activeShoppingList.ownerLabel}`}
+                          </p>
+                        </>
+                      ) : (
+                        <p className="text-slate-500">
+                          Select a list to manage it here.
+                        </p>
+                      )}
+                      {lists.length > 1 && (
+                        <div className="mt-4 flex flex-col gap-2">
+                          {lists.map((list) => {
+                            const isSelected =
+                              list.ownerId ===
+                              (activeShoppingList?.ownerId ?? selectedListId);
+                            return (
+                              <button
+                                key={list.ownerId}
+                                type="button"
+                                onClick={() => {
+                                  selectList(list.ownerId);
+                                  setIsListMenuOpen(false);
+                                }}
+                                className={`rounded-2xl border px-3 py-2 text-left text-xs font-semibold uppercase tracking-[0.2em] transition ${
+                                  isSelected
+                                    ? "border-slate-900 bg-slate-900 text-white"
+                                    : "border-slate-200 bg-white text-slate-600 hover:border-slate-300"
+                                }`}
+                              >
+                                {list.ownerLabel}
+                              </button>
+                            );
+                          })}
+                        </div>
+                      )}
+                      {canShareShoppingList && activeShoppingList && (
+                        <div className="mt-4 flex flex-wrap gap-2">
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setIsListMenuOpen(false);
+                              openRosterDialog(
+                                `${activeShoppingList.ownerLabel}'s list`,
+                                shoppingListCollaborators
+                              );
+                            }}
+                            disabled={isCollaborationsLoading}
+                            className={`rounded-2xl border px-3 py-2 text-xs font-semibold uppercase tracking-[0.25em] transition ${
+                              isCollaborationsLoading
+                                ? "border-slate-200 text-slate-400"
+                                : "border-slate-200 text-slate-600 hover:border-slate-300"
+                            }`}
+                          >
+                            {isCollaborationsLoading
+                              ? "Loading…"
+                              : "View collaborators"}
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              if (!currentUserId) {
+                                return;
+                              }
+                              setIsListMenuOpen(false);
+                              setInviteTarget({
+                                resourceType: "SHOPPING_LIST",
+                                resourceId: currentUserId,
+                                resourceLabel: `${activeShoppingList.ownerLabel}'s list`,
+                                description:
+                                  "Collaborators can add, remove, and reorder items on this list.",
+                              });
+                            }}
+                            className="rounded-2xl bg-rose-500 px-3 py-2 text-xs font-semibold uppercase tracking-[0.3em] text-white shadow-lg shadow-rose-200/80 transition hover:scale-[1.01]"
+                          >
+                            Invite
+                          </button>
+                        </div>
+                      )}
+                    </div>
+                  )}
+                </div>
+              )}
+              <button
+                type="button"
+                disabled={isSessionLoading}
+                onClick={() => {
+                  if (isAuthenticated) {
+                    void signOut();
+                  } else {
+                    void signIn("google");
+                  }
+                }}
+                className="inline-flex items-center justify-center rounded-2xl border border-slate-200 bg-white/70 px-5 py-2 text-sm font-semibold text-slate-700 shadow-inner shadow-white/60 transition hover:border-slate-300 disabled:cursor-not-allowed disabled:opacity-70"
+              >
+                {isAuthenticated ? "Sign out" : "Sign in with Google"}
+              </button>
+              <Link
+                href="/shopping-list"
+                className="inline-flex items-center justify-center rounded-2xl bg-slate-900 px-5 py-2 text-sm font-semibold text-white shadow-lg shadow-slate-900/20 transition hover:-translate-y-0.5"
+              >
+                Shopping list ({shoppingListTotal})
+              </Link>
+            </div>
+          </nav>
+          <div className="mt-6 grid gap-6 lg:grid-cols-[1.2fr_0.8fr]">
+            <div className="space-y-3">
+              <h1 className="text-3xl font-semibold leading-snug text-slate-900 sm:text-4xl">
+                Build dinners, snacks, and a synced shopping list.
+              </h1>
+              <p className="text-base text-slate-600">
+                Tag every ingredient, keep favorites close, and dispatch pantry
+                plans straight to the cart.
+              </p>
+            </div>
+            <div className="rounded-2xl border border-white/70 bg-white/80 p-5 text-sm text-slate-600 shadow-inner shadow-white/60">
+              <p className="text-xs font-semibold uppercase tracking-[0.35em] text-amber-500">
+                {isAuthenticated ? "Synced" : "Offline mode"}
+              </p>
+              <p className="mt-2 text-slate-700">
+                {isAuthenticated
+                  ? "Recipes and lists back up automatically across your devices."
+                  : "Sign in with Google to sync this library everywhere."}
+              </p>
               {!isAuthenticated && (
-                <p className="text-xs text-slate-500">
-                  We keep your local list for this browser, but sign in to sync
-                  it everywhere.
+                <p className="mt-2 text-xs text-slate-500">
+                  We keep your list in this browser until you sign in.
                 </p>
               )}
             </div>
           </div>
         </header>
 
-        <section className="grid gap-10 lg:grid-cols-[1.1fr_0.9fr]">
+        <section className="mt-2 grid gap-10 lg:grid-cols-[1.1fr_0.9fr]">
           <form
             onSubmit={handleSubmit}
             className="rounded-3xl border border-white/70 bg-white/90 p-8 shadow-xl shadow-amber-100/60 backdrop-blur"
@@ -1104,185 +1402,265 @@ export default function HomePage() {
                     : "No saved recipes yet. Add your first creation to see it in this library."}
                 </div>
               ) : (
-                displayedRecipes.map((recipe) => (
-                  <article
-                    key={recipe.id}
-                    draggable={canDragReorder}
-                    onDragStart={(event) => beginRecipeDrag(recipe.id, event)}
-                    onDragOver={handleRecipeDragOver}
-                    onDrop={(event) => handleRecipeDrop(event, recipe.id)}
-                    onDragEnd={finalizeRecipeDrag}
-                    aria-grabbed={draggingRecipeId === recipe.id}
-                    className={`group relative rounded-2xl border p-5 shadow-sm transition hover:-translate-y-0.5 hover:shadow-lg ${
-                      recipe.isFavorite
-                        ? "border-rose-200 bg-rose-50/80 shadow-rose-100"
-                        : "border-slate-100 bg-white/90 shadow-slate-100"
-                    } ${
-                      canDragReorder ? "cursor-grab active:cursor-grabbing" : ""
-                    } ${
-                      draggingRecipeId === recipe.id
-                        ? "opacity-70 ring-2 ring-rose-200"
-                        : ""
-                    }`}
-                  >
-                    <div
-                      className="absolute right-4 top-4 sm:right-5 sm:top-5"
-                      data-recipe-actions="true"
+                displayedRecipes.map((recipe) => {
+                  const recipeOwnerLabel =
+                    recipe.owner?.name || recipe.owner?.email || "Shared";
+                  const isRecipeOwner = recipe.owner?.id === currentUserId;
+                  const isSharedRecipe = Boolean(
+                    recipe.owner && !isRecipeOwner
+                  );
+                  const canShareRecipe = isAuthenticated && isRecipeOwner;
+                  const recipeCollaborators =
+                    recipeCollaboratorLookup.get(recipe.id) ?? [];
+                  return (
+                    <article
+                      key={recipe.id}
+                      draggable={canDragReorder}
+                      onDragStart={(event) => beginRecipeDrag(recipe.id, event)}
+                      onDragOver={handleRecipeDragOver}
+                      onDrop={(event) => handleRecipeDrop(event, recipe.id)}
+                      onDragEnd={finalizeRecipeDrag}
+                      aria-grabbed={draggingRecipeId === recipe.id}
+                      className={`group relative rounded-2xl border p-5 shadow-sm transition hover:-translate-y-0.5 hover:shadow-lg ${
+                        recipe.isFavorite
+                          ? "border-rose-200 bg-rose-50/80 shadow-rose-100"
+                          : "border-slate-100 bg-white/90 shadow-slate-100"
+                      } ${
+                        canDragReorder
+                          ? "cursor-grab active:cursor-grabbing"
+                          : ""
+                      } ${
+                        draggingRecipeId === recipe.id
+                          ? "opacity-70 ring-2 ring-rose-200"
+                          : ""
+                      }`}
                     >
-                      <button
-                        type="button"
-                        aria-haspopup="menu"
-                        aria-expanded={actionsMenuRecipeId === recipe.id}
-                        title="Recipe actions"
-                        disabled={deletingRecipeId === recipe.id}
-                        onClick={() =>
-                          setActionsMenuRecipeId((current) =>
-                            current === recipe.id ? null : recipe.id
-                          )
-                        }
-                        className="inline-flex items-center justify-center rounded-full border border-slate-200 bg-white/90 p-2 text-slate-500 shadow-inner shadow-white/70 transition hover:text-slate-900 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-slate-400 disabled:cursor-not-allowed disabled:opacity-60"
+                      <div
+                        className="absolute right-4 top-4 sm:right-5 sm:top-5"
+                        data-recipe-actions="true"
                       >
-                        <span className="sr-only">Open recipe actions</span>
-                        <span
-                          aria-hidden="true"
-                          className="flex flex-col items-center gap-1"
+                        <button
+                          type="button"
+                          aria-haspopup="menu"
+                          aria-expanded={actionsMenuRecipeId === recipe.id}
+                          title="Recipe actions"
+                          disabled={deletingRecipeId === recipe.id}
+                          onClick={() =>
+                            setActionsMenuRecipeId((current) =>
+                              current === recipe.id ? null : recipe.id
+                            )
+                          }
+                          className="inline-flex items-center justify-center rounded-full border border-slate-200 bg-white/90 p-2 text-slate-500 shadow-inner shadow-white/70 transition hover:text-slate-900 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-slate-400 disabled:cursor-not-allowed disabled:opacity-60"
                         >
-                          <span className="h-1 w-1 rounded-full bg-current" />
-                          <span className="h-1 w-1 rounded-full bg-current" />
-                          <span className="h-1 w-1 rounded-full bg-current" />
-                        </span>
-                      </button>
-                      {actionsMenuRecipeId === recipe.id && (
-                        <div className="absolute right-0 z-10 mt-3 w-48 rounded-2xl border border-slate-100 bg-white/95 p-1 text-sm font-medium text-slate-600 shadow-lg shadow-slate-200/80">
-                          <button
-                            type="button"
-                            className={`flex w-full items-center justify-between rounded-xl px-3 py-2 text-left transition ${
-                              recipe.isFavorite
-                                ? "text-rose-600 hover:bg-rose-50"
-                                : "hover:bg-slate-50"
-                            }`}
-                            disabled={
-                              deletingRecipeId === recipe.id ||
-                              favoriteUpdatingId === recipe.id
-                            }
-                            onClick={() => {
-                              setActionsMenuRecipeId(null);
-                              void handleToggleFavorite(recipe);
-                            }}
+                          <span className="sr-only">Open recipe actions</span>
+                          <span
+                            aria-hidden="true"
+                            className="flex flex-col items-center gap-1"
                           >
-                            <span>
-                              {favoriteUpdatingId === recipe.id
-                                ? "Updating…"
-                                : recipe.isFavorite
-                                ? "Remove favorite"
-                                : "Mark favorite"}
-                            </span>
-                            <span
-                              className={`text-xs ${
+                            <span className="h-1 w-1 rounded-full bg-current" />
+                            <span className="h-1 w-1 rounded-full bg-current" />
+                            <span className="h-1 w-1 rounded-full bg-current" />
+                          </span>
+                        </button>
+                        {actionsMenuRecipeId === recipe.id && (
+                          <div className="absolute right-0 z-10 mt-3 w-48 rounded-2xl border border-slate-100 bg-white/95 p-1 text-sm font-medium text-slate-600 shadow-lg shadow-slate-200/80">
+                            <button
+                              type="button"
+                              className={`flex w-full items-center justify-between rounded-xl px-3 py-2 text-left transition ${
                                 recipe.isFavorite
-                                  ? "text-rose-400"
-                                  : "text-slate-400"
+                                  ? "text-rose-600 hover:bg-rose-50"
+                                  : "hover:bg-slate-50"
                               }`}
+                              disabled={
+                                deletingRecipeId === recipe.id ||
+                                favoriteUpdatingId === recipe.id
+                              }
+                              onClick={() => {
+                                setActionsMenuRecipeId(null);
+                                void handleToggleFavorite(recipe);
+                              }}
                             >
-                              {recipe.isFavorite ? "★" : "☆"}
-                            </span>
-                          </button>
-                          <button
-                            type="button"
-                            className="flex w-full items-center justify-between rounded-xl px-3 py-2 text-left transition hover:bg-slate-50"
-                            disabled={deletingRecipeId === recipe.id}
-                            onClick={() => {
-                              setActionsMenuRecipeId(null);
-                              handleEditRecipe(recipe);
-                            }}
-                          >
-                            <span>
-                              {editingRecipeId === recipe.id
-                                ? "Editing"
-                                : "Edit"}
-                            </span>
-                            <span className="text-xs text-slate-400">⌘E</span>
-                          </button>
-                          <button
-                            type="button"
-                            className="flex w-full items-center justify-between rounded-xl px-3 py-2 text-left text-rose-600 transition hover:bg-rose-50"
-                            disabled={deletingRecipeId === recipe.id}
-                            onClick={() => {
-                              setActionsMenuRecipeId(null);
-                              void handleDeleteRecipe(recipe);
-                            }}
-                          >
-                            <span>Delete</span>
-                            <span className="text-xs text-rose-300">⌘⌫</span>
-                          </button>
-                        </div>
-                      )}
-                    </div>
-                    <div className="flex flex-col gap-4 pr-10 sm:flex-row sm:items-start sm:justify-between sm:pr-12">
-                      <div>
-                        <div className="flex flex-wrap items-center gap-2">
-                          <h3 className="text-lg font-semibold text-slate-900">
-                            {recipe.title}
-                          </h3>
-                        </div>
-                        {recipe.summary && (
-                          <p className="mt-1 text-sm text-slate-500">
-                            {recipe.summary}
-                          </p>
-                        )}
-                        {recipe.tags.length > 0 && (
-                          <div className="mt-2 flex flex-nowrap items-center gap-2 overflow-x-auto pb-1">
-                            {recipe.tags.map((tag, index) => (
-                              <span
-                                key={`${recipe.id}-tag-${index}`}
-                                className="flex-shrink-0 rounded-full bg-rose-100/80 px-3 py-1 text-xs font-semibold text-rose-500 whitespace-nowrap"
-                              >
-                                #{tag}
+                              <span>
+                                {favoriteUpdatingId === recipe.id
+                                  ? "Updating…"
+                                  : recipe.isFavorite
+                                  ? "Remove favorite"
+                                  : "Mark favorite"}
                               </span>
-                            ))}
+                              <span
+                                className={`text-xs ${
+                                  recipe.isFavorite
+                                    ? "text-rose-400"
+                                    : "text-slate-400"
+                                }`}
+                              >
+                                {recipe.isFavorite ? "★" : "☆"}
+                              </span>
+                            </button>
+                            <button
+                              type="button"
+                              className="flex w-full items-center justify-between rounded-xl px-3 py-2 text-left transition hover:bg-slate-50"
+                              disabled={deletingRecipeId === recipe.id}
+                              onClick={() => {
+                                setActionsMenuRecipeId(null);
+                                handleEditRecipe(recipe);
+                              }}
+                            >
+                              <span>
+                                {editingRecipeId === recipe.id
+                                  ? "Editing"
+                                  : "Edit"}
+                              </span>
+                              <span className="text-xs text-slate-400">⌘E</span>
+                            </button>
+                            {canShareRecipe && (
+                              <button
+                                type="button"
+                                className="flex w-full items-center justify-between rounded-xl px-3 py-2 text-left transition hover:bg-slate-50"
+                                onClick={() => {
+                                  setActionsMenuRecipeId(null);
+                                  openRosterDialog(
+                                    `Collaborators on “${recipe.title}”`,
+                                    recipeCollaborators
+                                  );
+                                }}
+                              >
+                                <span>View collaborators</span>
+                                <span className="text-xs text-slate-400">
+                                  👥
+                                </span>
+                              </button>
+                            )}
+                            {canShareRecipe && (
+                              <button
+                                type="button"
+                                className="flex w-full items-center justify-between rounded-xl px-3 py-2 text-left transition hover:bg-slate-50"
+                                onClick={() => {
+                                  setActionsMenuRecipeId(null);
+                                  setInviteTarget({
+                                    resourceType: "RECIPE",
+                                    resourceId: recipe.id,
+                                    resourceLabel: recipe.title,
+                                    description:
+                                      "Collaborators can edit this recipe and send its ingredients to their shopping list.",
+                                  });
+                                }}
+                              >
+                                <span>Share recipe</span>
+                                <span className="text-xs text-slate-400">
+                                  ⇢
+                                </span>
+                              </button>
+                            )}
+                            <button
+                              type="button"
+                              className="flex w-full items-center justify-between rounded-xl px-3 py-2 text-left text-rose-600 transition hover:bg-rose-50"
+                              disabled={deletingRecipeId === recipe.id}
+                              onClick={() => {
+                                setActionsMenuRecipeId(null);
+                                void handleDeleteRecipe(recipe);
+                              }}
+                            >
+                              <span>Delete</span>
+                              <span className="text-xs text-rose-300">⌘⌫</span>
+                            </button>
                           </div>
                         )}
                       </div>
-                      <div className="flex flex-col items-end gap-2 text-right">
-                        {isAuthenticated && recipe.isFavorite && (
-                          <span className="rounded-full bg-rose-100 px-3 py-1 text-xs font-semibold text-rose-600">
-                            Favorited
+                      <div className="flex flex-col gap-4 pr-10 sm:flex-row sm:items-start sm:justify-between sm:pr-12">
+                        <div>
+                          <div className="flex flex-wrap items-center gap-2">
+                            <h3 className="text-lg font-semibold text-slate-900">
+                              {recipe.title}
+                            </h3>
+                            {isSharedRecipe && (
+                              <span className="rounded-full bg-rose-100/90 px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.25em] text-rose-500">
+                                Shared by {recipeOwnerLabel}
+                              </span>
+                            )}
+                          </div>
+                          {recipe.summary && (
+                            <p className="mt-1 text-sm text-slate-500">
+                              {recipe.summary}
+                            </p>
+                          )}
+                          {recipe.tags.length > 0 && (
+                            <div className="mt-2 flex flex-nowrap items-center gap-2 overflow-x-auto pb-1">
+                              {recipe.tags.map((tag, index) => (
+                                <span
+                                  key={`${recipe.id}-tag-${index}`}
+                                  className="flex-shrink-0 rounded-full bg-rose-100/80 px-3 py-1 text-xs font-semibold text-rose-500 whitespace-nowrap"
+                                >
+                                  #{tag}
+                                </span>
+                              ))}
+                            </div>
+                          )}
+                        </div>
+                        <div className="flex flex-col items-end gap-2 text-right">
+                          {isAuthenticated && recipe.isFavorite && (
+                            <span className="rounded-full bg-rose-100 px-3 py-1 text-xs font-semibold text-rose-600">
+                              Favorited
+                            </span>
+                          )}
+                          <span className="inline-flex items-center gap-1 rounded-full bg-slate-900/5 px-3 py-1 text-xs font-semibold text-slate-600 leading-none">
+                            <span className="text-sm text-slate-800 leading-none">
+                              {recipe.ingredients.length}
+                            </span>
+                            <span className="uppercase tracking-wide text-[11px] leading-none">
+                              items
+                            </span>
                           </span>
-                        )}
-                        <span className="inline-flex items-center gap-1 rounded-full bg-slate-900/5 px-3 py-1 text-xs font-semibold text-slate-600 leading-none">
-                          <span className="text-sm text-slate-800 leading-none">
-                            {recipe.ingredients.length}
-                          </span>
-                          <span className="uppercase tracking-wide text-[11px] leading-none">
-                            items
-                          </span>
-                        </span>
+                        </div>
                       </div>
-                    </div>
-                    <ul className="mt-4 flex flex-wrap gap-2 text-xs font-medium text-slate-600">
-                      {recipe.ingredients.map((ingredient, index) => (
-                        <li
-                          key={`${recipe.id}-ingredient-${index}`}
-                          className="rounded-full bg-white/70 px-3 py-1 text-slate-600 shadow-inner shadow-white/70"
-                        >
-                          {ingredient}
-                        </li>
-                      ))}
-                    </ul>
-                    <button
-                      type="button"
-                      onClick={() => handleAddToShoppingList(recipe)}
-                      className="mt-4 inline-flex w-full items-center justify-center rounded-xl bg-slate-900/90 px-4 py-2 text-sm font-semibold text-white transition hover:bg-slate-900"
-                    >
-                      Send ingredients to shopping list
-                    </button>
-                  </article>
-                ))
+                      <ul className="mt-4 flex flex-wrap gap-2 text-xs font-medium text-slate-600">
+                        {recipe.ingredients.map((ingredient, index) => (
+                          <li
+                            key={`${recipe.id}-ingredient-${index}`}
+                            className="rounded-full bg-white/70 px-3 py-1 text-slate-600 shadow-inner shadow-white/70"
+                          >
+                            {ingredient}
+                          </li>
+                        ))}
+                      </ul>
+                      <button
+                        type="button"
+                        onClick={() => handleAddToShoppingList(recipe)}
+                        className="mt-4 inline-flex w-full items-center justify-center rounded-xl bg-slate-900/90 px-4 py-2 text-sm font-semibold text-white transition hover:bg-slate-900"
+                      >
+                        Send ingredients to shopping list
+                      </button>
+                    </article>
+                  );
+                })
               )}
             </div>
           </div>
         </section>
       </main>
+      <CollaborationInviteDialog
+        open={Boolean(inviteTarget)}
+        title={
+          inviteTarget?.resourceType === "SHOPPING_LIST"
+            ? "Share your shopping list"
+            : "Share this recipe"
+        }
+        description={
+          inviteTarget?.description ??
+          (inviteTarget?.resourceType === "SHOPPING_LIST"
+            ? "Invite someone to edit and organize groceries with you."
+            : "Give another cook edit access to this recipe.")
+        }
+        resourceLabel={inviteTarget?.resourceLabel ?? ""}
+        onClose={() => setInviteTarget(null)}
+        onSubmit={handleInviteSubmit}
+      />
+      <CollaboratorRosterDialog
+        open={Boolean(rosterModal)}
+        title={rosterModal?.title ?? ""}
+        collaborators={rosterModal?.collaborators ?? []}
+        onClose={() => setRosterModal(null)}
+      />
       {activeToast && (
         <div
           role="status"

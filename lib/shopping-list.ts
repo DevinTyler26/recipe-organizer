@@ -16,12 +16,16 @@ export type ShoppingListRecord = {
 export type ShoppingListState = Record<string, ShoppingListRecord>;
 
 export type ShoppingListItem = {
-  key: string;
+  id: string;
+  storageKey: string;
   label: string;
   unitSummary: string;
   occurrences: number;
   sources: string[];
   order: number;
+  ownerId: string;
+  ownerLabel: string;
+  isSelf: boolean;
 };
 
 export type IncomingIngredient = {
