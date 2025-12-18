@@ -1,8 +1,11 @@
 @import "tailwindcss";
 
 :root {
-  --background: #ffffff;
-  --foreground: #171717;
+  --background: #fff7ed;
+  --foreground: #0f172a;
+  --accent-rose: #fb7185;
+  --accent-amber: #fbbf24;
+  --card: rgba(255, 255, 255, 0.86);
 }
 
 @theme inline {
@@ -14,13 +17,21 @@
 
 @media (prefers-color-scheme: dark) {
   :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
+    --background: #0d0f1a;
+    --foreground: #f8fafc;
+    --card: rgba(16, 18, 27, 0.92);
   }
 }
 
 body {
   background: var(--background);
   color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
+  font-family: var(--font-geist-sans), "Space Grotesk", "Helvetica Neue", Arial, sans-serif;
+  min-height: 100vh;
+  letter-spacing: -0.01em;
+}
+
+::selection {
+  background: var(--accent-rose);
+  color: #fff7ed;
 }
