@@ -6,12 +6,14 @@ import {
   useContext,
   useEffect,
   useMemo,
+  useRef,
   useState,
   type ReactNode,
 } from "react";
 import { useSession } from "next-auth/react";
 
 import {
+  collectSourceTitles,
   IncomingIngredient,
   QuantityEntry,
   ShoppingListItem,
@@ -42,6 +44,9 @@ type ShoppingListContextValue = {
   totalItems: number;
   isSyncing: boolean;
   isRemote: boolean;
+  externalUpdateNotice: ExternalListUpdateNotice | null;
+  acknowledgeExternalUpdate: () => void;
+  refreshCollaborativeLists: () => Promise<void>;
 };
 
 type OwnerListState = {
@@ -49,6 +54,12 @@ type OwnerListState = {
   ownerLabel: string;
   isSelf: boolean;
   state: ShoppingListState;
+};
+
+type ExternalListUpdateNotice = {
+  ownerId: string;
+  ownerLabel: string;
+  isSelf: boolean;
 };
 
 export type ShoppingListListMeta = {
@@ -90,6 +101,7 @@ const getNextOrderValue = (state: ShoppingListState) => {
 
 const LOCAL_OWNER_ID = "local";
 const LOCAL_LIST_LABEL = "This device";
+const REMOTE_SYNC_INTERVAL_MS = 12_000;
 
 export function ShoppingListProvider({ children }: { children: ReactNode }) {
   const { data: session, status } = useSession();
@@ -109,6 +121,11 @@ export function ShoppingListProvider({ children }: { children: ReactNode }) {
     }
     return window.localStorage.getItem(SELECTED_OWNER_STORAGE_KEY);
   });
+  const [externalUpdateNotice, setExternalUpdateNotice] =
+    useState<ExternalListUpdateNotice | null>(null);
+  const listSignatureRef = useRef<Map<string, string>>(new Map());
+  const pendingOwnerMutationsRef = useRef<Map<string, number>>(new Map());
+  const hasPrimedListSignaturesRef = useRef(false);
 
   const fetchRemoteLists = useCallback(async () => {
     const response = await fetch("/api/shopping-list", { cache: "no-store" });
@@ -132,12 +149,93 @@ export function ShoppingListProvider({ children }: { children: ReactNode }) {
     }));
   }, []);
 
+  const acknowledgeExternalUpdate = useCallback(() => {
+    setExternalUpdateNotice(null);
+  }, []);
+
+  const evaluateRemoteListChanges = useCallback(
+    (lists: OwnerListState[], options?: { prime?: boolean }) => {
+      if (!isAuthenticated) {
+        listSignatureRef.current.clear();
+        pendingOwnerMutationsRef.current.clear();
+        hasPrimedListSignaturesRef.current = false;
+        setExternalUpdateNotice(null);
+        return;
+      }
+      const prime = options?.prime ?? !hasPrimedListSignaturesRef.current;
+      const signatures = listSignatureRef.current;
+      const pending = pendingOwnerMutationsRef.current;
+      const seen = new Set<string>();
+
+      lists.forEach((list) => {
+        seen.add(list.ownerId);
+        const signature = serializeListState(list.state);
+        const previous = signatures.get(list.ownerId);
+        signatures.set(list.ownerId, signature);
+        if (prime || !previous || previous === signature) {
+          return;
+        }
+        if (pending.has(list.ownerId)) {
+          return;
+        }
+        setExternalUpdateNotice({
+          ownerId: list.ownerId,
+          ownerLabel: list.ownerLabel,
+          isSelf: list.isSelf,
+        });
+      });
+
+      Array.from(signatures.keys()).forEach((ownerId) => {
+        if (!seen.has(ownerId)) {
+          signatures.delete(ownerId);
+          pending.delete(ownerId);
+        }
+      });
+
+      if (prime && lists.length) {
+        hasPrimedListSignaturesRef.current = true;
+      }
+    },
+    [isAuthenticated]
+  );
+
+  const backgroundRefreshRemoteLists = useCallback(
+    async (options?: { shouldAbort?: () => boolean }) => {
+      const shouldAbort = options?.shouldAbort;
+      try {
+        const lists = await fetchRemoteLists();
+        if (shouldAbort?.()) {
+          return;
+        }
+        setRemoteLists(lists);
+        setIsRemote(true);
+        evaluateRemoteListChanges(lists);
+      } catch (error) {
+        if (!shouldAbort?.()) {
+          console.error("Failed to refresh shopping lists", error);
+        }
+      }
+    },
+    [evaluateRemoteListChanges, fetchRemoteLists]
+  );
+
+  const refreshCollaborativeLists = useCallback(() => {
+    if (!isAuthenticated) {
+      return Promise.resolve();
+    }
+    return backgroundRefreshRemoteLists();
+  }, [backgroundRefreshRemoteLists, isAuthenticated]);
+
   useEffect(() => {
     if (!isAuthenticated) {
       setIsRemote(false);
       setRemoteLists([]);
       setLocalStore(readStoredState());
       setSelectedOwnerId(LOCAL_OWNER_ID);
+      listSignatureRef.current.clear();
+      pendingOwnerMutationsRef.current.clear();
+      hasPrimedListSignaturesRef.current = false;
+      setExternalUpdateNotice(null);
       return;
     }
 
@@ -154,6 +252,7 @@ export function ShoppingListProvider({ children }: { children: ReactNode }) {
           }
           return lists[0]?.ownerId ?? currentUserId ?? current;
         });
+        evaluateRemoteListChanges(lists, { prime: true });
       })
       .catch((error) => {
         if (!cancelled) {
@@ -170,20 +269,84 @@ export function ShoppingListProvider({ children }: { children: ReactNode }) {
     return () => {
       cancelled = true;
     };
-  }, [currentUserId, fetchRemoteLists, isAuthenticated]);
+  }, [
+    currentUserId,
+    evaluateRemoteListChanges,
+    fetchRemoteLists,
+    isAuthenticated,
+  ]);
+
+  useEffect(() => {
+    if (!isAuthenticated) {
+      return;
+    }
+    let cancelled = false;
+    const tick = () => {
+      if (cancelled) {
+        return;
+      }
+      void backgroundRefreshRemoteLists({ shouldAbort: () => cancelled });
+    };
+    tick();
+    const intervalId = window.setInterval(tick, REMOTE_SYNC_INTERVAL_MS);
+    return () => {
+      cancelled = true;
+      window.clearInterval(intervalId);
+    };
+  }, [backgroundRefreshRemoteLists, isAuthenticated]);
 
   useEffect(() => {
     if (typeof window === "undefined" || isAuthenticated) return;
     window.localStorage.setItem(STORAGE_KEY, JSON.stringify(localStore));
   }, [localStore, isAuthenticated]);
 
+  useEffect(() => {
+    if (!isAuthenticated) {
+      return;
+    }
+    const handleFocus = () => {
+      void backgroundRefreshRemoteLists();
+    };
+    const handleVisibility = () => {
+      if (document.visibilityState === "visible") {
+        void backgroundRefreshRemoteLists();
+      }
+    };
+    window.addEventListener("focus", handleFocus);
+    document.addEventListener("visibilitychange", handleVisibility);
+    return () => {
+      window.removeEventListener("focus", handleFocus);
+      document.removeEventListener("visibilitychange", handleVisibility);
+    };
+  }, [backgroundRefreshRemoteLists, isAuthenticated]);
+
+  useEffect(() => {
+    if (!isAuthenticated) {
+      return;
+    }
+    const source = new EventSource("/api/live");
+    const handleMessage = () => {
+      void backgroundRefreshRemoteLists();
+    };
+    source.onmessage = handleMessage;
+    source.onerror = (event) => {
+      console.error("Live shopping list updates connection lost", event);
+    };
+    return () => {
+      source.close();
+    };
+  }, [backgroundRefreshRemoteLists, isAuthenticated]);
+
   const runRemoteMutation = useCallback(
-    async (action: () => Promise<Response>) => {
+    async (action: () => Promise<Response>, ownerScope?: string | null) => {
       if (!isAuthenticated) {
         return {
           success: false,
           error: new Error("You need to sign in to sync this list"),
         } as const;
+      }
+      if (ownerScope) {
+        pendingOwnerMutationsRef.current.set(ownerScope, Date.now());
       }
       setIsSyncing(true);
       try {
@@ -203,6 +366,7 @@ export function ShoppingListProvider({ children }: { children: ReactNode }) {
           }
           return nextLists[0]?.ownerId ?? currentUserId ?? current;
         });
+        evaluateRemoteListChanges(nextLists);
         return { success: true } as const;
       } catch (error) {
         console.error("Shopping list sync failed", error);
@@ -214,10 +378,18 @@ export function ShoppingListProvider({ children }: { children: ReactNode }) {
               : new Error("Shopping list sync failed"),
         } as const;
       } finally {
+        if (ownerScope) {
+          pendingOwnerMutationsRef.current.delete(ownerScope);
+        }
         setIsSyncing(false);
       }
     },
-    [currentUserId, fetchRemoteLists, isAuthenticated]
+    [
+      currentUserId,
+      evaluateRemoteListChanges,
+      fetchRemoteLists,
+      isAuthenticated,
+    ]
   );
 
   const resolveOwnerId = useCallback(
@@ -280,12 +452,14 @@ export function ShoppingListProvider({ children }: { children: ReactNode }) {
         return;
       }
 
-      void runRemoteMutation(() =>
-        fetch("/api/shopping-list", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ ingredients, ownerId: targetOwnerId }),
-        })
+      void runRemoteMutation(
+        () =>
+          fetch("/api/shopping-list", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ ingredients, ownerId: targetOwnerId }),
+          }),
+        targetOwnerId
       );
     },
     [isAuthenticated, resolveOwnerId, runRemoteMutation]
@@ -310,8 +484,12 @@ export function ShoppingListProvider({ children }: { children: ReactNode }) {
         label: key,
         ownerId: targetOwnerId,
       });
-      void runRemoteMutation(() =>
-        fetch(`/api/shopping-list?${params.toString()}`, { method: "DELETE" })
+      void runRemoteMutation(
+        () =>
+          fetch(`/api/shopping-list?${params.toString()}`, {
+            method: "DELETE",
+          }),
+        targetOwnerId
       );
     },
     [isAuthenticated, resolveOwnerId, runRemoteMutation]
@@ -327,8 +505,12 @@ export function ShoppingListProvider({ children }: { children: ReactNode }) {
       const targetOwnerId = resolveOwnerId(ownerOverride);
       if (!targetOwnerId) return;
       const params = new URLSearchParams({ ownerId: targetOwnerId });
-      void runRemoteMutation(() =>
-        fetch(`/api/shopping-list?${params.toString()}`, { method: "DELETE" })
+      void runRemoteMutation(
+        () =>
+          fetch(`/api/shopping-list?${params.toString()}`, {
+            method: "DELETE",
+          }),
+        targetOwnerId
       );
     },
     [isAuthenticated, resolveOwnerId, runRemoteMutation]
@@ -372,12 +554,17 @@ export function ShoppingListProvider({ children }: { children: ReactNode }) {
         return changed ? next : current;
       });
 
-      void runRemoteMutation(() =>
-        fetch("/api/shopping-list", {
-          method: "PATCH",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ order: orderedKeys, ownerId: targetOwnerId }),
-        })
+      void runRemoteMutation(
+        () =>
+          fetch("/api/shopping-list", {
+            method: "PATCH",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              order: orderedKeys,
+              ownerId: targetOwnerId,
+            }),
+          }),
+        targetOwnerId
       );
     },
     [isAuthenticated, remoteLists, resolveOwnerId, runRemoteMutation]
@@ -419,16 +606,18 @@ export function ShoppingListProvider({ children }: { children: ReactNode }) {
         })
       );
 
-      const result = await runRemoteMutation(() =>
-        fetch("/api/shopping-list", {
-          method: "PUT",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            ownerId: targetOwnerId,
-            label: key,
-            quantity: quantityText,
+      const result = await runRemoteMutation(
+        () =>
+          fetch("/api/shopping-list", {
+            method: "PUT",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              ownerId: targetOwnerId,
+              label: key,
+              quantity: quantityText,
+            }),
           }),
-        })
+        targetOwnerId
       );
 
       if (!result.success) {
@@ -548,6 +737,9 @@ export function ShoppingListProvider({ children }: { children: ReactNode }) {
       totalItems,
       isSyncing,
       isRemote,
+      externalUpdateNotice,
+      acknowledgeExternalUpdate,
+      refreshCollaborativeLists,
     }),
     [
       items,
@@ -562,6 +754,9 @@ export function ShoppingListProvider({ children }: { children: ReactNode }) {
       totalItems,
       isSyncing,
       isRemote,
+      externalUpdateNotice,
+      acknowledgeExternalUpdate,
+      refreshCollaborativeLists,
     ]
   );
 
@@ -593,13 +788,7 @@ function mapStateToItems(
       label: record.label,
       unitSummary: summarizeEntries(record.entries),
       occurrences: record.entries.length,
-      sources: Array.from(
-        new Set(
-          record.entries
-            .map((entry) => entry.sourceRecipeTitle?.trim())
-            .filter((title): title is string => Boolean(title))
-        )
-      ),
+      sources: collectSourceTitles(record.entries),
       order: record.order ?? 0,
       ownerId: meta.ownerId,
       ownerLabel: meta.ownerLabel,
@@ -611,6 +800,23 @@ function mapStateToItems(
       }
       return a.label.localeCompare(b.label);
     });
+}
+
+function serializeListState(state: ShoppingListState) {
+  const payload = Object.entries(state)
+    .map(([key, record]) => ({
+      key,
+      order: record.order ?? 0,
+      entries: record.entries.map((entry) => ({
+        quantityText: entry.quantityText,
+        amountValue: entry.amountValue ?? null,
+        measureText: entry.measureText ?? "",
+        sourceRecipeId: entry.sourceRecipeId ?? null,
+        sourceRecipeTitle: entry.sourceRecipeTitle ?? null,
+      })),
+    }))
+    .sort((a, b) => a.key.localeCompare(b.key));
+  return JSON.stringify(payload);
 }
 
 function reorderState(
@@ -649,7 +855,11 @@ function applyQuantityOverrideToState(
   if (!record) {
     return state;
   }
-  const manualEntry = buildManualQuantityEntry(record.label, quantityText);
+  const manualEntry = buildManualQuantityEntry(
+    record.label,
+    quantityText,
+    collectSourceTitles(record.entries)
+  );
   if (
     record.entries.length === 1 &&
     record.entries[0].quantityText === manualEntry.quantityText &&
@@ -669,18 +879,23 @@ function applyQuantityOverrideToState(
 
 function buildManualQuantityEntry(
   label: string,
-  quantityText: string
+  quantityText: string,
+  sourceTitles?: string[]
 ): QuantityEntry {
   const trimmed = quantityText.trim();
   const parsed = parseIngredient(
     trimmed ? `${trimmed} ${label}`.trim() : label
   );
+  const manualSourceTitle =
+    sourceTitles && sourceTitles.length
+      ? sourceTitles.join(" · ")
+      : "Manual adjustment";
   return {
     id: createId(),
     quantityText: trimmed || "As listed",
     amountValue: trimmed && parsed.quantityText ? parsed.amountValue : null,
     measureText: parsed.measureText,
-    sourceRecipeTitle: "Manual adjustment",
+    sourceRecipeTitle: manualSourceTitle,
   };
 }
 

@@ -10,6 +10,7 @@ import {
   type FormEvent,
 } from "react";
 import { useShoppingList } from "@/components/shopping-list-context";
+import { useToast } from "@/components/toast-provider";
 import { CollaborationInviteDialog } from "@/components/collaboration-invite-dialog";
 import { formatCollaboratorLabel } from "@/lib/collaborator-label";
 import type { CollaborationRoster } from "@/types/collaboration";
@@ -29,7 +30,10 @@ export default function ShoppingListPage() {
     totalItems,
     isSyncing,
     isRemote,
+    externalUpdateNotice,
+    acknowledgeExternalUpdate,
   } = useShoppingList();
+  const { showToast } = useToast();
   const [draggingKey, setDraggingKey] = useState<string | null>(null);
   const [isInviteOpen, setIsInviteOpen] = useState(false);
   const [inviteNotice, setInviteNotice] = useState<{
@@ -174,6 +178,17 @@ export default function ShoppingListPage() {
   useEffect(() => {
     void refreshCollaborations();
   }, [isAuthenticated, refreshCollaborations]);
+
+  useEffect(() => {
+    if (!externalUpdateNotice) {
+      return;
+    }
+    const listLabel = externalUpdateNotice.isSelf
+      ? "your shopping list"
+      : `${externalUpdateNotice.ownerLabel}'s list`;
+    showToast(`A collaborator updated ${listLabel}.`, "info");
+    acknowledgeExternalUpdate();
+  }, [acknowledgeExternalUpdate, externalUpdateNotice, showToast]);
 
   useEffect(() => {
     if (!inviteNotice) return;

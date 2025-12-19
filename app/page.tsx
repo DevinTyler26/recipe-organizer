@@ -14,18 +14,12 @@ import { signIn, signOut, useSession } from "next-auth/react";
 import { useShoppingList } from "@/components/shopping-list-context";
 import { CollaborationInviteDialog } from "@/components/collaboration-invite-dialog";
 import { CollaboratorRosterDialog } from "@/components/collaborator-roster-dialog";
+import { useToast } from "@/components/toast-provider";
 import type {
   CollaborationRoster,
   CollaboratorSummary,
 } from "@/types/collaboration";
 
-type ToastTone = "success" | "info" | "error";
-
-type ToastMessage = {
-  id: number;
-  message: string;
-  tone: ToastTone;
-};
 type RecipeOwner = {
   id: string;
   name: string | null;
@@ -40,6 +34,9 @@ type Recipe = {
   isFavorite: boolean;
   order: number;
   owner: RecipeOwner;
+  updatedAt: string;
+  updatedBy: RecipeOwner;
+  updatedById: string | null;
 };
 
 type InviteTarget = {
@@ -56,19 +53,23 @@ type CollaboratorRosterModalConfig = {
   resourceId: string;
 };
 
-type StoredRecipe = Omit<Recipe, "tags" | "order"> & {
+type StoredRecipe = {
+  id: string;
+  title: string;
+  summary?: string | null;
+  ingredients: string[];
   tags?: string[];
+  isFavorite?: boolean;
   order?: number;
   sortOrder?: number;
   owner?: RecipeOwner;
+  updatedAt?: string;
+  updatedBy?: RecipeOwner;
+  updatedById?: string | null;
 };
 
-const toastToneStyles: Record<ToastTone, string> = {
-  success:
-    "border-emerald-100 bg-emerald-50 text-emerald-700 shadow-emerald-100/80",
-  info: "border-slate-200 bg-white text-slate-700 shadow-slate-200/80",
-  error: "border-rose-200 bg-rose-50 text-rose-700 shadow-rose-100/80",
-};
+const STARTER_UPDATED_AT = "2024-01-01T00:00:00.000Z";
+const RECIPE_REFRESH_INTERVAL_MS = 12_000;
 
 const starterRecipes: Recipe[] = [
   {
@@ -90,6 +91,9 @@ const starterRecipes: Recipe[] = [
     isFavorite: true,
     order: 0,
     owner: null,
+    updatedAt: STARTER_UPDATED_AT,
+    updatedBy: null,
+    updatedById: null,
   },
   {
     id: "starter-sheet-pan-gnocchi",
@@ -109,6 +113,9 @@ const starterRecipes: Recipe[] = [
     isFavorite: false,
     order: 1,
     owner: null,
+    updatedAt: STARTER_UPDATED_AT,
+    updatedBy: null,
+    updatedById: null,
   },
   {
     id: "starter-midnight-brownies",
@@ -127,6 +134,9 @@ const starterRecipes: Recipe[] = [
     isFavorite: false,
     order: 2,
     owner: null,
+    updatedAt: STARTER_UPDATED_AT,
+    updatedBy: null,
+    updatedById: null,
   },
 ];
 
@@ -203,11 +213,29 @@ const normalizeRecipe = (recipe: StoredRecipe): Recipe => {
       ? recipe.sortOrder
       : 0;
 
+  const owner = normalizeRecipeOwner(recipe.owner);
+  const updatedBy = normalizeRecipeOwner(recipe.updatedBy);
+  const updatedAt =
+    typeof recipe.updatedAt === "string" && recipe.updatedAt.length
+      ? recipe.updatedAt
+      : new Date().toISOString();
+  const updatedById = recipe.updatedById ?? updatedBy?.id ?? null;
+
   return {
-    ...recipe,
-    order: normalizedOrder,
+    id: recipe.id,
+    title: recipe.title,
+    summary:
+      typeof recipe.summary === "string"
+        ? recipe.summary
+        : recipe.summary ?? null,
+    ingredients: Array.isArray(recipe.ingredients) ? recipe.ingredients : [],
     tags: ensureTagsArray(recipe.tags),
-    owner: normalizeRecipeOwner(recipe.owner),
+    isFavorite: Boolean(recipe.isFavorite),
+    order: normalizedOrder,
+    owner,
+    updatedAt,
+    updatedBy,
+    updatedById,
   };
 };
 
@@ -233,11 +261,20 @@ const summarizeCollaborators = (collaborators: CollaboratorSummary[]) => {
 };
 
 export default function HomePage() {
-  const { addItems, totalItems, lists, selectedListId, selectList } =
-    useShoppingList();
+  const {
+    addItems,
+    totalItems,
+    lists,
+    selectedListId,
+    selectList,
+    externalUpdateNotice,
+    acknowledgeExternalUpdate,
+    refreshCollaborativeLists,
+  } = useShoppingList();
   const { data: session, status } = useSession();
   const isAuthenticated = status === "authenticated";
   const isSessionLoading = status === "loading";
+  const { showToast } = useToast();
   const [recipes, setRecipes] = useState<Recipe[]>(starterRecipes);
   const [form, setForm] = useState(emptyForm);
   const [isSyncing, setIsSyncing] = useState(false);
@@ -256,8 +293,6 @@ export default function HomePage() {
   const [recipesLoaded, setRecipesLoaded] = useState(false);
   const [shareWithCurrentCollaborators, setShareWithCurrentCollaborators] =
     useState(true);
-  const [toastQueue, setToastQueue] = useState<ToastMessage[]>([]);
-  const [activeToast, setActiveToast] = useState<ToastMessage | null>(null);
   const [libraryFilter, setLibraryFilter] = useState<"all" | "favorites">(
     "all"
   );
@@ -279,6 +314,8 @@ export default function HomePage() {
     string | null
   >(null);
   const listMenuRef = useRef<HTMLDivElement | null>(null);
+  const recipeUpdateLedgerRef = useRef<Map<string, string>>(new Map());
+  const hasPrimedRecipeLedgerRef = useRef(false);
   const currentUserId = session?.user?.id ?? null;
   const accountLabel = session?.user?.name || session?.user?.email || "Account";
   const isAdmin = Boolean(session?.user?.isAdmin);
@@ -371,14 +408,46 @@ export default function HomePage() {
     }
   }, [isAuthenticated]);
 
-  const showToast = useCallback(
-    (message: string, tone: ToastTone = "success") => {
-      setToastQueue((current) => [
-        ...current,
-        { id: Date.now() + Math.random(), message, tone },
-      ]);
+  const noteCollaboratorRecipeUpdates = useCallback(
+    (incoming: Recipe[], options?: { suppressNotifications?: boolean }) => {
+      if (!isAuthenticated) {
+        recipeUpdateLedgerRef.current.clear();
+        hasPrimedRecipeLedgerRef.current = false;
+        return;
+      }
+      const suppress =
+        options?.suppressNotifications || !hasPrimedRecipeLedgerRef.current;
+      const ledger = recipeUpdateLedgerRef.current;
+      const seen = new Set<string>();
+
+      incoming.forEach((recipe) => {
+        seen.add(recipe.id);
+        const updatedAtValue = recipe.updatedAt ?? "";
+        const previous = ledger.get(recipe.id);
+        ledger.set(recipe.id, updatedAtValue);
+        if (suppress || !previous || previous === updatedAtValue) {
+          return;
+        }
+        const actorId = recipe.updatedBy?.id ?? null;
+        if (!actorId || actorId === currentUserId) {
+          return;
+        }
+        const actorLabel =
+          recipe.updatedBy?.name?.trim() ||
+          recipe.updatedBy?.email?.trim() ||
+          "A collaborator";
+        showToast(`${actorLabel} updated “${recipe.title}”.`, "info");
+      });
+
+      Array.from(ledger.keys()).forEach((id) => {
+        if (!seen.has(id)) {
+          ledger.delete(id);
+        }
+      });
+
+      hasPrimedRecipeLedgerRef.current = true;
     },
-    []
+    [currentUserId, isAuthenticated, showToast]
   );
 
   const handleInviteSubmit = useCallback(
@@ -408,6 +477,52 @@ export default function HomePage() {
     [inviteTarget, refreshCollaborations, showToast]
   );
 
+  const fetchRemoteRecipes = useCallback(
+    async (
+      options: {
+        background?: boolean;
+        suppressNotifications?: boolean;
+      } = {}
+    ) => {
+      if (!isAuthenticated) {
+        return;
+      }
+      const { background = false, suppressNotifications = false } = options;
+      if (!background) {
+        setIsSyncing(true);
+      }
+      try {
+        const response = await fetch("/api/recipes", { cache: "no-store" });
+        const body = (await response.json().catch(() => null)) as {
+          recipes?: Recipe[];
+          error?: string;
+        } | null;
+        if (!response.ok) {
+          throw new Error(body?.error ?? "Failed to load recipes");
+        }
+        const normalized = normalizeRecipeList(
+          body?.recipes as StoredRecipe[] | undefined
+        );
+        setRecipes(normalized);
+        noteCollaboratorRecipeUpdates(normalized, {
+          suppressNotifications,
+        });
+        setRecipesLoaded(true);
+      } catch (error) {
+        console.error("Failed to fetch recipes", error);
+        if (!background) {
+          showToast("Unable to load your saved recipes.", "error");
+          setRecipesLoaded(true);
+        }
+      } finally {
+        if (!background) {
+          setIsSyncing(false);
+        }
+      }
+    },
+    [isAuthenticated, noteCollaboratorRecipeUpdates, showToast]
+  );
+
   const persistRecipeOrder = useCallback(
     async (orderedIds: string[]) => {
       if (!isAuthenticated || orderedIds.length === 0) {
@@ -433,8 +548,6 @@ export default function HomePage() {
     },
     [isAuthenticated, showToast]
   );
-
-  const dismissToast = () => setActiveToast(null);
 
   const resetFormState = useCallback(() => {
     setForm(emptyForm);
@@ -534,6 +647,8 @@ export default function HomePage() {
             setGuestLibraryLoaded(true);
             setIsSyncing(false);
             setRecipesLoaded(true);
+            recipeUpdateLedgerRef.current.clear();
+            hasPrimedRecipeLedgerRef.current = false;
             return;
           }
         }
@@ -544,64 +659,81 @@ export default function HomePage() {
       setIsSyncing(false);
       setGuestLibraryLoaded(true);
       setRecipesLoaded(true);
+      recipeUpdateLedgerRef.current.clear();
+      hasPrimedRecipeLedgerRef.current = false;
       return;
     }
 
     setGuestLibraryLoaded(false);
     setRecipesLoaded(false);
-    let cancelled = false;
-    const fetchRecipes = async () => {
-      setIsSyncing(true);
-      try {
-        const response = await fetch("/api/recipes");
-        const body = (await response.json().catch(() => null)) as {
-          recipes?: Recipe[];
-          error?: string;
-        } | null;
-        if (!response.ok) {
-          throw new Error(body?.error ?? "Failed to load recipes");
-        }
-        if (!cancelled) {
-          setRecipes(
-            normalizeRecipeList(body?.recipes as StoredRecipe[] | undefined)
-          );
-          setRecipesLoaded(true);
-        }
-      } catch (error) {
-        if (!cancelled) {
-          console.error("Failed to fetch recipes", error);
-          showToast("Unable to load your saved recipes.", "error");
-          setRecipesLoaded(true);
-        }
-      } finally {
-        if (!cancelled) {
-          setIsSyncing(false);
-        }
+    recipeUpdateLedgerRef.current.clear();
+    hasPrimedRecipeLedgerRef.current = false;
+    void fetchRemoteRecipes({ suppressNotifications: true });
+  }, [fetchRemoteRecipes, isAuthenticated]);
+
+  useEffect(() => {
+    if (!isAuthenticated) {
+      return;
+    }
+    const intervalId = window.setInterval(() => {
+      void fetchRemoteRecipes({ background: true });
+    }, RECIPE_REFRESH_INTERVAL_MS);
+    return () => window.clearInterval(intervalId);
+  }, [fetchRemoteRecipes, isAuthenticated]);
+
+  useEffect(() => {
+    if (!isAuthenticated) {
+      return;
+    }
+    const handleFocus = () => {
+      void fetchRemoteRecipes({ background: true });
+    };
+    const handleVisibility = () => {
+      if (document.visibilityState === "visible") {
+        void fetchRemoteRecipes({ background: true });
       }
     };
-
-    fetchRecipes();
+    window.addEventListener("focus", handleFocus);
+    document.addEventListener("visibilitychange", handleVisibility);
     return () => {
-      cancelled = true;
+      window.removeEventListener("focus", handleFocus);
+      document.removeEventListener("visibilitychange", handleVisibility);
     };
-  }, [isAuthenticated, showToast]);
+  }, [fetchRemoteRecipes, isAuthenticated]);
 
   useEffect(() => {
-    if (activeToast || toastQueue.length === 0) {
+    if (!isAuthenticated) {
       return;
     }
-    setActiveToast(toastQueue[0]);
-    setToastQueue((current) => current.slice(1));
-  }, [activeToast, toastQueue]);
+    const source = new EventSource("/api/live");
+    const handleMessage = () => {
+      void fetchRemoteRecipes({ background: true });
+      void refreshCollaborativeLists();
+    };
+    source.onmessage = handleMessage;
+    source.onerror = (event) => {
+      console.error("Live updates connection lost", event);
+    };
+    return () => {
+      source.close();
+    };
+  }, [fetchRemoteRecipes, isAuthenticated, refreshCollaborativeLists]);
 
   useEffect(() => {
-    if (!activeToast) {
+    if (!externalUpdateNotice || !isAuthenticated) {
       return;
     }
-    const timeoutId = window.setTimeout(() => setActiveToast(null), 3600);
-    return () => window.clearTimeout(timeoutId);
-  }, [activeToast]);
-
+    const listLabel = externalUpdateNotice.isSelf
+      ? "your shopping list"
+      : `${externalUpdateNotice.ownerLabel}'s list`;
+    showToast(`A collaborator updated ${listLabel}.`, "info");
+    acknowledgeExternalUpdate();
+  }, [
+    acknowledgeExternalUpdate,
+    externalUpdateNotice,
+    isAuthenticated,
+    showToast,
+  ]);
   useEffect(() => {
     const storedFilter = window.localStorage.getItem("recipe-library-filter");
     if (storedFilter === "all" || storedFilter === "favorites") {
@@ -751,6 +883,9 @@ export default function HomePage() {
         isFavorite: false,
         order: nextLocalOrder,
         owner: null,
+        updatedAt: new Date().toISOString(),
+        updatedBy: null,
+        updatedById: null,
       };
       setRecipes((current) => [newRecipe, ...current]);
       resetFormState();
@@ -760,18 +895,18 @@ export default function HomePage() {
     }
 
     try {
+      const requestBody: Record<string, unknown> = { ...payload };
+      if (shareTargetOwnerId) {
+        requestBody.shareWithOwnerId = shareTargetOwnerId;
+      }
+      if (collaboratorIdsPayload?.length) {
+        requestBody.collaboratorIds = collaboratorIdsPayload;
+      }
+
       const response = await fetch("/api/recipes", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(
-          shareTargetOwnerId
-            ? {
-                ...payload,
-                shareWithOwnerId: shareTargetOwnerId,
-                collaboratorIds: collaboratorIdsPayload,
-              }
-            : payload
-        ),
+        body: JSON.stringify(requestBody),
       });
       const body = (await response.json().catch(() => null)) as {
         recipe?: Recipe;
@@ -1977,25 +2112,6 @@ export default function HomePage() {
               </div>
             </div>
           </div>
-        </div>
-      )}
-      {activeToast && (
-        <div
-          role="status"
-          aria-live="polite"
-          className={`fixed bottom-6 right-6 z-50 flex min-w-[260px] items-start gap-4 rounded-2xl border px-5 py-3 text-sm font-semibold shadow-2xl transition ${
-            toastToneStyles[activeToast.tone]
-          }`}
-        >
-          <span className="flex-1 leading-snug">{activeToast.message}</span>
-          <button
-            type="button"
-            onClick={dismissToast}
-            className="mt-0.5 rounded-full bg-white/70 px-2 py-1 text-xs font-bold uppercase tracking-wide text-slate-500 shadow-inner shadow-white/70 transition hover:bg-white"
-            aria-label="Dismiss notification"
-          >
-            Close
-          </button>
         </div>
       )}
     </div>
