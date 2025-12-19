@@ -56,6 +56,7 @@ npm run lint    # run eslint across the repo
 
 - `app/api/recipes` stores recipes per user account.
 - `app/api/shopping-list` persists normalized ingredient entries and hydrates the shopping list provider when you sign in.
+- Admin accounts are tracked via the `User.isAdmin` column. Flip it to `true` (via SQL or Prisma Studio) for anyone who should manage the whitelist UI at `/whitelist`, which talks to `app/api/allowed-emails`.
 - Signed-out users keep data in localStorage; signing in switches to the database-backed experience automatically.
 
 ## Running Prisma Migrations
