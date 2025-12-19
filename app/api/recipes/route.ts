@@ -62,6 +62,7 @@ export async function POST(request: Request) {
   }
 
   const {
+    id,
     title,
     summary,
     ingredients,
@@ -69,6 +70,7 @@ export async function POST(request: Request) {
     shareWithOwnerId,
     collaboratorIds,
   } = (payload ?? {}) as {
+    id?: unknown;
     title?: unknown;
     summary?: unknown;
     ingredients?: unknown;
@@ -76,6 +78,17 @@ export async function POST(request: Request) {
     shareWithOwnerId?: unknown;
     collaboratorIds?: unknown;
   };
+
+  let clientProvidedId: string | null = null;
+  if (id !== undefined) {
+    if (typeof id !== "string" || !id.trim()) {
+      return NextResponse.json(
+        { error: "id must be a non-empty string" },
+        { status: 400 }
+      );
+    }
+    clientProvidedId = id.trim();
+  }
 
   if (typeof title !== "string" || !title.trim()) {
     return NextResponse.json({ error: "Title is required" }, { status: 400 });
@@ -178,6 +191,7 @@ export async function POST(request: Request) {
 
     const recipe = await prisma.recipe.create({
       data: {
+        id: clientProvidedId ?? undefined,
         ownerId: user.id,
         createdById: user.id,
         updatedById: user.id,

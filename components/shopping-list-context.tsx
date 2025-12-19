@@ -21,9 +21,15 @@ import {
   parseIngredient,
   summarizeEntries,
 } from "@/lib/shopping-list";
+import {
+  flushOfflineQueue,
+  sendOrQueueRequest,
+  type QueueableRequest,
+} from "@/lib/offline-queue";
 
 const STORAGE_KEY = "recipe-organizer-shopping-list";
 const SELECTED_OWNER_STORAGE_KEY = "recipe-organizer-active-shopping-list";
+const REMOTE_LIST_CACHE_KEY = "recipe-organizer-remote-shopping-lists";
 
 type ShoppingListContextValue = {
   items: ShoppingListItem[];
@@ -83,6 +89,60 @@ function readStoredState(): ShoppingListState {
   }
 }
 
+type StoredOwnerListState = {
+  ownerId: string;
+  ownerLabel: string;
+  isSelf: boolean;
+  state: ShoppingListState;
+};
+
+const readRemoteListCache = (): OwnerListState[] => {
+  if (typeof window === "undefined") {
+    return [];
+  }
+  try {
+    const raw = window.localStorage.getItem(REMOTE_LIST_CACHE_KEY);
+    if (!raw) {
+      return [];
+    }
+    const parsed = JSON.parse(raw) as StoredOwnerListState[];
+    if (!Array.isArray(parsed)) {
+      return [];
+    }
+    return parsed
+      .filter((entry) => entry && typeof entry.ownerId === "string")
+      .map((entry) => ({
+        ownerId: entry.ownerId,
+        ownerLabel: entry.ownerLabel,
+        isSelf: entry.isSelf,
+        state: reviveStore(entry.state),
+      }));
+  } catch (error) {
+    console.warn("Failed to read cached shopping lists", error);
+    return [];
+  }
+};
+
+const persistRemoteListCache = (lists: OwnerListState[]) => {
+  if (typeof window === "undefined") {
+    return;
+  }
+  try {
+    const serializable = lists.map((list) => ({
+      ownerId: list.ownerId,
+      ownerLabel: list.ownerLabel,
+      isSelf: list.isSelf,
+      state: list.state,
+    }));
+    window.localStorage.setItem(
+      REMOTE_LIST_CACHE_KEY,
+      JSON.stringify(serializable)
+    );
+  } catch (error) {
+    console.warn("Failed to cache shopping lists", error);
+  }
+};
+
 const getNextOrderValue = (state: ShoppingListState) => {
   const orders = Object.values(state).map((record) => record.order ?? 0);
   return orders.length ? Math.max(...orders) : -1;
@@ -133,7 +193,11 @@ export function ShoppingListProvider({ children }: { children: ReactNode }) {
   }, []);
 
   useEffect(() => {
-    if (!isAuthenticated) {
+    if (status === "loading") {
+      return;
+    }
+
+    if (status !== "authenticated") {
       setIsRemote(false);
       setRemoteLists([]);
       setLocalStore(readStoredState());
@@ -148,6 +212,7 @@ export function ShoppingListProvider({ children }: { children: ReactNode }) {
         if (cancelled) return;
         setRemoteLists(lists);
         setIsRemote(true);
+        persistRemoteListCache(lists);
         setSelectedOwnerId((current) => {
           if (current && lists.some((list) => list.ownerId === current)) {
             return current;
@@ -158,7 +223,13 @@ export function ShoppingListProvider({ children }: { children: ReactNode }) {
       .catch((error) => {
         if (!cancelled) {
           console.error("Failed to fetch shopping list", error);
-          setIsRemote(false);
+          const cached = readRemoteListCache();
+          if (cached.length) {
+            setRemoteLists(cached);
+            setIsRemote(true);
+          } else {
+            setIsRemote(false);
+          }
         }
       })
       .finally(() => {
@@ -170,7 +241,7 @@ export function ShoppingListProvider({ children }: { children: ReactNode }) {
     return () => {
       cancelled = true;
     };
-  }, [currentUserId, fetchRemoteLists, isAuthenticated]);
+  }, [currentUserId, fetchRemoteLists, status]);
 
   useEffect(() => {
     if (typeof window === "undefined" || isAuthenticated) return;
@@ -178,7 +249,7 @@ export function ShoppingListProvider({ children }: { children: ReactNode }) {
   }, [localStore, isAuthenticated]);
 
   const runRemoteMutation = useCallback(
-    async (action: () => Promise<Response>) => {
+    async (request: QueueableRequest) => {
       if (!isAuthenticated) {
         return {
           success: false,
@@ -187,22 +258,25 @@ export function ShoppingListProvider({ children }: { children: ReactNode }) {
       }
       setIsSyncing(true);
       try {
-        const response = await action();
-        if (!response.ok) {
-          const body = (await response.json().catch(() => null)) as {
+        const result = await sendOrQueueRequest(request);
+        if (result.response && !result.response.ok) {
+          const body = (await result.response.json().catch(() => null)) as {
             error?: string;
           } | null;
           throw new Error(body?.error ?? "Shopping list request failed");
         }
-        const nextLists = await fetchRemoteLists();
-        setRemoteLists(nextLists);
-        setIsRemote(true);
-        setSelectedOwnerId((current) => {
-          if (current && nextLists.some((list) => list.ownerId === current)) {
-            return current;
-          }
-          return nextLists[0]?.ownerId ?? currentUserId ?? current;
-        });
+        if (!result.queued) {
+          const nextLists = await fetchRemoteLists();
+          setRemoteLists(nextLists);
+          setIsRemote(true);
+          persistRemoteListCache(nextLists);
+          setSelectedOwnerId((current) => {
+            if (current && nextLists.some((list) => list.ownerId === current)) {
+              return current;
+            }
+            return nextLists[0]?.ownerId ?? currentUserId ?? current;
+          });
+        }
         return { success: true } as const;
       } catch (error) {
         console.error("Shopping list sync failed", error);
@@ -237,40 +311,9 @@ export function ShoppingListProvider({ children }: { children: ReactNode }) {
     (ingredients: IncomingIngredient[], ownerOverride?: string) => {
       if (!ingredients.length) return;
       if (!isAuthenticated) {
-        setLocalStore((current) => {
-          const next = { ...current } as ShoppingListState;
-          let orderCursor = getNextOrderValue(next);
-          ingredients.forEach(({ value, recipeId, recipeTitle }) => {
-            const parsed = parseIngredient(value);
-            if (!parsed.label) return;
-            const key = parsed.normalizedLabel || normalizeLabel(parsed.label);
-            const entry: QuantityEntry = {
-              id: createId(),
-              quantityText: parsed.quantityText,
-              amountValue: parsed.amountValue,
-              measureText: parsed.measureText,
-              sourceRecipeId: recipeId,
-              sourceRecipeTitle: recipeTitle,
-            };
-            const existing = next[key];
-            if (existing) {
-              next[key] = {
-                ...existing,
-                label: parsed.label,
-                entries: [...existing.entries, entry],
-                order: existing.order,
-              };
-            } else {
-              orderCursor += 1;
-              next[key] = {
-                label: parsed.label,
-                entries: [entry],
-                order: orderCursor,
-              };
-            }
-          });
-          return next;
-        });
+        setLocalStore((current) =>
+          appendIngredientsToState(current, ingredients)
+        );
         return;
       }
 
@@ -280,15 +323,40 @@ export function ShoppingListProvider({ children }: { children: ReactNode }) {
         return;
       }
 
-      void runRemoteMutation(() =>
-        fetch("/api/shopping-list", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ ingredients, ownerId: targetOwnerId }),
-        })
-      );
+      setRemoteLists((current) => {
+        const existing = current.find((list) => list.ownerId === targetOwnerId);
+        const fallbackMeta = existing
+          ? { ownerLabel: existing.ownerLabel, isSelf: existing.isSelf }
+          : {
+              ownerLabel:
+                targetOwnerId === currentUserId
+                  ? currentUserLabel
+                  : "Shared list",
+              isSelf: targetOwnerId === currentUserId,
+            };
+        return updateOwnerListState(
+          current,
+          targetOwnerId,
+          (state) => appendIngredientsToState(state, ingredients),
+          fallbackMeta
+        );
+      });
+      setIsRemote(true);
+
+      void runRemoteMutation({
+        url: "/api/shopping-list",
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ ingredients, ownerId: targetOwnerId }),
+      });
     },
-    [isAuthenticated, resolveOwnerId, runRemoteMutation]
+    [
+      currentUserId,
+      currentUserLabel,
+      isAuthenticated,
+      resolveOwnerId,
+      runRemoteMutation,
+    ]
   );
 
   const removeItem = useCallback(
@@ -310,9 +378,15 @@ export function ShoppingListProvider({ children }: { children: ReactNode }) {
         label: key,
         ownerId: targetOwnerId,
       });
-      void runRemoteMutation(() =>
-        fetch(`/api/shopping-list?${params.toString()}`, { method: "DELETE" })
+      setRemoteLists((current) =>
+        updateOwnerListState(current, targetOwnerId, (state) =>
+          removeItemFromState(state, key)
+        )
       );
+      void runRemoteMutation({
+        url: `/api/shopping-list?${params.toString()}`,
+        method: "DELETE",
+      });
     },
     [isAuthenticated, resolveOwnerId, runRemoteMutation]
   );
@@ -327,11 +401,36 @@ export function ShoppingListProvider({ children }: { children: ReactNode }) {
       const targetOwnerId = resolveOwnerId(ownerOverride);
       if (!targetOwnerId) return;
       const params = new URLSearchParams({ ownerId: targetOwnerId });
-      void runRemoteMutation(() =>
-        fetch(`/api/shopping-list?${params.toString()}`, { method: "DELETE" })
-      );
+      setRemoteLists((current) => {
+        const existing = current.find((list) => list.ownerId === targetOwnerId);
+        const fallbackMeta = existing
+          ? { ownerLabel: existing.ownerLabel, isSelf: existing.isSelf }
+          : {
+              ownerLabel:
+                targetOwnerId === currentUserId
+                  ? currentUserLabel
+                  : "Shared list",
+              isSelf: targetOwnerId === currentUserId,
+            };
+        return updateOwnerListState(
+          current,
+          targetOwnerId,
+          () => ({}),
+          fallbackMeta
+        );
+      });
+      void runRemoteMutation({
+        url: `/api/shopping-list?${params.toString()}`,
+        method: "DELETE",
+      });
     },
-    [isAuthenticated, resolveOwnerId, runRemoteMutation]
+    [
+      currentUserId,
+      currentUserLabel,
+      isAuthenticated,
+      resolveOwnerId,
+      runRemoteMutation,
+    ]
   );
 
   const reorderItems = useCallback(
@@ -372,13 +471,12 @@ export function ShoppingListProvider({ children }: { children: ReactNode }) {
         return changed ? next : current;
       });
 
-      void runRemoteMutation(() =>
-        fetch("/api/shopping-list", {
-          method: "PATCH",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ order: orderedKeys, ownerId: targetOwnerId }),
-        })
-      );
+      void runRemoteMutation({
+        url: "/api/shopping-list",
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ order: orderedKeys, ownerId: targetOwnerId }),
+      });
     },
     [isAuthenticated, remoteLists, resolveOwnerId, runRemoteMutation]
   );
@@ -419,17 +517,16 @@ export function ShoppingListProvider({ children }: { children: ReactNode }) {
         })
       );
 
-      const result = await runRemoteMutation(() =>
-        fetch("/api/shopping-list", {
-          method: "PUT",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            ownerId: targetOwnerId,
-            label: key,
-            quantity: quantityText,
-          }),
-        })
-      );
+      const result = await runRemoteMutation({
+        url: "/api/shopping-list",
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          ownerId: targetOwnerId,
+          label: key,
+          quantity: quantityText,
+        }),
+      });
 
       if (!result.success) {
         setRemoteLists(previousLists);
@@ -485,6 +582,13 @@ export function ShoppingListProvider({ children }: { children: ReactNode }) {
   }, [resolvedLists]);
 
   useEffect(() => {
+    if (!isAuthenticated || !remoteLists.length) {
+      return;
+    }
+    persistRemoteListCache(remoteLists);
+  }, [isAuthenticated, remoteLists]);
+
+  useEffect(() => {
     if (typeof window === "undefined") return;
     if (selectedOwnerId) {
       window.localStorage.setItem(SELECTED_OWNER_STORAGE_KEY, selectedOwnerId);
@@ -492,6 +596,38 @@ export function ShoppingListProvider({ children }: { children: ReactNode }) {
       window.localStorage.removeItem(SELECTED_OWNER_STORAGE_KEY);
     }
   }, [selectedOwnerId]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") {
+      return;
+    }
+
+    let mounted = true;
+    const attemptFlush = async () => {
+      await flushOfflineQueue();
+      if (!mounted || status !== "authenticated") {
+        return;
+      }
+      try {
+        const lists = await fetchRemoteLists();
+        setRemoteLists(lists);
+        setIsRemote(true);
+        persistRemoteListCache(lists);
+      } catch (error) {
+        console.debug("Unable to refresh shopping lists after flush", error);
+      }
+    };
+
+    void attemptFlush();
+    const handleOnline = () => {
+      void attemptFlush();
+    };
+    window.addEventListener("online", handleOnline);
+    return () => {
+      mounted = false;
+      window.removeEventListener("online", handleOnline);
+    };
+  }, [fetchRemoteLists, status]);
 
   const activeList = useMemo(() => {
     if (!resolvedLists.length) return null;
@@ -638,6 +774,98 @@ function reorderState(
     }
   });
   return updated ? next : state;
+}
+
+function appendIngredientsToState(
+  state: ShoppingListState,
+  ingredients: IncomingIngredient[]
+): ShoppingListState {
+  if (!ingredients.length) {
+    return state;
+  }
+  const next = { ...state } as ShoppingListState;
+  let orderCursor = getNextOrderValue(next);
+  let changed = false;
+  ingredients.forEach(({ value, recipeId, recipeTitle }) => {
+    const parsed = parseIngredient(value);
+    if (!parsed.label) {
+      return;
+    }
+    const key = parsed.normalizedLabel || normalizeLabel(parsed.label);
+    const entry: QuantityEntry = {
+      id: createId(),
+      quantityText: parsed.quantityText,
+      amountValue: parsed.amountValue,
+      measureText: parsed.measureText,
+      sourceRecipeId: recipeId,
+      sourceRecipeTitle: recipeTitle,
+    };
+    const existing = next[key];
+    if (existing) {
+      next[key] = {
+        ...existing,
+        label: parsed.label,
+        entries: [...existing.entries, entry],
+      };
+    } else {
+      orderCursor += 1;
+      next[key] = {
+        label: parsed.label,
+        entries: [entry],
+        order: orderCursor,
+      };
+    }
+    changed = true;
+  });
+  return changed ? next : state;
+}
+
+function removeItemFromState(
+  state: ShoppingListState,
+  key: string
+): ShoppingListState {
+  if (!key || !state[key]) {
+    return state;
+  }
+  const next = { ...state } as ShoppingListState;
+  delete next[key];
+  return next;
+}
+
+function updateOwnerListState(
+  lists: OwnerListState[],
+  ownerId: string,
+  producer: (state: ShoppingListState) => ShoppingListState,
+  fallbackMeta?: { ownerLabel: string; isSelf: boolean }
+): OwnerListState[] {
+  let found = false;
+  const nextLists = lists.map((list) => {
+    if (list.ownerId !== ownerId) {
+      return list;
+    }
+    found = true;
+    const nextState = producer(list.state);
+    if (nextState === list.state) {
+      return list;
+    }
+    return { ...list, state: nextState };
+  });
+  if (found) {
+    return nextLists;
+  }
+  if (!fallbackMeta) {
+    return lists;
+  }
+  const nextState = producer({});
+  return [
+    ...nextLists,
+    {
+      ownerId,
+      ownerLabel: fallbackMeta.ownerLabel,
+      isSelf: fallbackMeta.isSelf,
+      state: nextState,
+    },
+  ];
 }
 
 function applyQuantityOverrideToState(

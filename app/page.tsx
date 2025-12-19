@@ -18,6 +18,7 @@ import type {
   CollaborationRoster,
   CollaboratorSummary,
 } from "@/types/collaboration";
+import { flushOfflineQueue, sendOrQueueRequest } from "@/lib/offline-queue";
 
 type ToastTone = "success" | "info" | "error";
 
@@ -124,6 +125,7 @@ const starterRecipes: Recipe[] = [
 ];
 
 const LOCAL_RECIPES_KEY = "recipe-library-local";
+const SYNCED_RECIPES_CACHE_KEY = "recipe-library-synced";
 
 const generateRecipeId = () => {
   if (
@@ -133,6 +135,37 @@ const generateRecipeId = () => {
     return crypto.randomUUID();
   }
   return `recipe-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+};
+
+const readSyncedRecipesCache = (): StoredRecipe[] => {
+  if (typeof window === "undefined") {
+    return [];
+  }
+  try {
+    const raw = window.localStorage.getItem(SYNCED_RECIPES_CACHE_KEY);
+    if (!raw) {
+      return [];
+    }
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? (parsed as StoredRecipe[]) : [];
+  } catch (error) {
+    console.warn("Failed to read recipe cache", error);
+    return [];
+  }
+};
+
+const persistSyncedRecipesCache = (recipes: StoredRecipe[]) => {
+  if (typeof window === "undefined") {
+    return;
+  }
+  try {
+    window.localStorage.setItem(
+      SYNCED_RECIPES_CACHE_KEY,
+      JSON.stringify(recipes)
+    );
+  } catch (error) {
+    console.warn("Failed to cache recipes", error);
+  }
 };
 
 const emptyForm = {
@@ -249,6 +282,8 @@ export default function HomePage() {
   const [recipesLoaded, setRecipesLoaded] = useState(false);
   const [shareWithCurrentCollaborators, setShareWithCurrentCollaborators] =
     useState(true);
+  const [isOfflineMode, setIsOfflineMode] = useState(false);
+  const [recipeReloadToken, setRecipeReloadToken] = useState(0);
   const [toastQueue, setToastQueue] = useState<ToastMessage[]>([]);
   const [activeToast, setActiveToast] = useState<ToastMessage | null>(null);
   const [libraryFilter, setLibraryFilter] = useState<"all" | "favorites">(
@@ -297,6 +332,38 @@ export default function HomePage() {
   useEffect(() => {
     setShareWithCurrentCollaborators(true);
   }, [activeShoppingList?.ownerId]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") {
+      return;
+    }
+    const handleStatusChange = () => {
+      setIsOfflineMode(!window.navigator.onLine);
+    };
+    handleStatusChange();
+    window.addEventListener("online", handleStatusChange);
+    window.addEventListener("offline", handleStatusChange);
+    return () => {
+      window.removeEventListener("online", handleStatusChange);
+      window.removeEventListener("offline", handleStatusChange);
+    };
+  }, []);
+
+  useEffect(() => {
+    if (typeof window === "undefined") {
+      return;
+    }
+    const handleOnlineSync = () => {
+      void flushOfflineQueue();
+      if (isAuthenticated) {
+        setRecipeReloadToken((token) => token + 1);
+      }
+    };
+    window.addEventListener("online", handleOnlineSync);
+    return () => {
+      window.removeEventListener("online", handleOnlineSync);
+    };
+  }, [isAuthenticated]);
   const shoppingListDestinationLabel =
     activeShoppingList?.ownerLabel ??
     (isAuthenticated ? "your list" : "this device");
@@ -405,16 +472,20 @@ export default function HomePage() {
       }
 
       try {
-        const response = await fetch("/api/recipes/reorder", {
+        const result = await sendOrQueueRequest({
+          url: "/api/recipes/reorder",
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ order: orderedIds }),
         });
-        if (!response.ok) {
-          const body = (await response.json().catch(() => null)) as {
+        if (result.response && !result.response.ok) {
+          const body = (await result.response.json().catch(() => null)) as {
             error?: string;
           } | null;
           throw new Error(body?.error ?? "Failed to sync order");
+        }
+        if (result.queued) {
+          showToast("Recipe order will sync once you're back online.", "info");
         }
       } catch (error) {
         console.error("Failed to persist recipe order", error);
@@ -470,6 +541,7 @@ export default function HomePage() {
             setGuestLibraryLoaded(true);
             setIsSyncing(false);
             setRecipesLoaded(true);
+            setIsOfflineMode(false);
             return;
           }
         }
@@ -480,6 +552,7 @@ export default function HomePage() {
       setIsSyncing(false);
       setGuestLibraryLoaded(true);
       setRecipesLoaded(true);
+      setIsOfflineMode(false);
       return;
     }
 
@@ -502,11 +575,21 @@ export default function HomePage() {
             normalizeRecipeList(body?.recipes as StoredRecipe[] | undefined)
           );
           setRecipesLoaded(true);
+          persistSyncedRecipesCache(
+            (body?.recipes as StoredRecipe[] | undefined) ?? []
+          );
+          setIsOfflineMode(false);
         }
       } catch (error) {
         if (!cancelled) {
           console.error("Failed to fetch recipes", error);
-          showToast("Unable to load your saved recipes.", "error");
+          const cached = readSyncedRecipesCache();
+          if (cached.length) {
+            setRecipes(normalizeRecipeList(cached));
+            setIsOfflineMode(true);
+          } else {
+            showToast("Unable to load your saved recipes.", "error");
+          }
           setRecipesLoaded(true);
         }
       } finally {
@@ -520,7 +603,7 @@ export default function HomePage() {
     return () => {
       cancelled = true;
     };
-  }, [isAuthenticated, showToast]);
+  }, [isAuthenticated, recipeReloadToken, showToast]);
 
   useEffect(() => {
     if (activeToast || toastQueue.length === 0) {
@@ -571,6 +654,17 @@ export default function HomePage() {
   }, [guestLibraryLoaded, isAuthenticated, recipes]);
 
   useEffect(() => {
+    if (!isAuthenticated) {
+      return;
+    }
+    try {
+      persistSyncedRecipesCache(recipes as StoredRecipe[]);
+    } catch (error) {
+      console.error("Failed to cache synced recipes", error);
+    }
+  }, [isAuthenticated, recipes]);
+
+  useEffect(() => {
     if (!sortPreferenceLoaded || typeof window === "undefined") {
       return;
     }
@@ -608,34 +702,69 @@ export default function HomePage() {
     setIsSaving(true);
     if (editingRecipeId) {
       const recipeIdBeingEdited = editingRecipeId;
+      const currentRecipe = recipes.find(
+        (existing) => existing.id === recipeIdBeingEdited
+      );
+      if (!currentRecipe) {
+        showToast("Unable to find this recipe locally.", "error");
+        resetFormState();
+        setIsSaving(false);
+        return;
+      }
       if (isAuthenticated) {
+        const optimisticRecipe: Recipe = {
+          ...currentRecipe,
+          title: trimmedTitle,
+          summary: payload.summary,
+          ingredients,
+          tags,
+        };
+        const previousRecipes = recipes;
+        setRecipes((current) =>
+          current.map((existing) =>
+            existing.id === recipeIdBeingEdited ? optimisticRecipe : existing
+          )
+        );
         try {
-          const response = await fetch("/api/recipes", {
+          const result = await sendOrQueueRequest({
+            url: "/api/recipes",
             method: "PUT",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ id: recipeIdBeingEdited, ...payload }),
           });
-          const body = (await response.json().catch(() => null)) as {
-            recipe?: Recipe;
-            error?: string;
-          } | null;
-          if (!response.ok || !body?.recipe) {
+          if (result.response && !result.response.ok) {
+            const body = (await result.response.json().catch(() => null)) as {
+              error?: string;
+            } | null;
             throw new Error(body?.error ?? "Failed to update recipe");
           }
-          const updatedServerRecipe = normalizeRecipe(
-            body.recipe as StoredRecipe
-          );
-          setRecipes((current) =>
-            current.map((existing) =>
-              existing.id === recipeIdBeingEdited
-                ? updatedServerRecipe
-                : existing
-            )
-          );
+          if (!result.queued && result.response) {
+            const body = (await result.response.json().catch(() => null)) as {
+              recipe?: StoredRecipe;
+              error?: string;
+            } | null;
+            if (!body?.recipe) {
+              throw new Error(body?.error ?? "Failed to update recipe");
+            }
+            const updatedServerRecipe = normalizeRecipe(
+              body.recipe as StoredRecipe
+            );
+            setRecipes((current) =>
+              current.map((existing) =>
+                existing.id === recipeIdBeingEdited
+                  ? updatedServerRecipe
+                  : existing
+              )
+            );
+          }
           resetFormState();
-          showToast(`${updatedServerRecipe.title} was updated.`);
+          const offlineSuffix = result.queued
+            ? " We'll sync when you're back online."
+            : "";
+          showToast(`${optimisticRecipe.title} was updated.${offlineSuffix}`);
         } catch (error) {
           console.error("Failed to update recipe", error);
+          setRecipes(previousRecipes);
           showToast(
             "Unable to update recipe right now. Please retry.",
             "error"
@@ -646,15 +775,6 @@ export default function HomePage() {
         return;
       }
 
-      const currentRecipe = recipes.find(
-        (existing) => existing.id === recipeIdBeingEdited
-      );
-      if (!currentRecipe) {
-        showToast("Unable to find this recipe locally.", "error");
-        resetFormState();
-        setIsSaving(false);
-        return;
-      }
       const updatedRecipe: Recipe = {
         ...currentRecipe,
         title: trimmedTitle,
@@ -695,29 +815,72 @@ export default function HomePage() {
       return;
     }
 
+    const nextRemoteOrder =
+      recipes.length > 0
+        ? Math.min(...recipes.map((existing) => existing.order)) - 1
+        : 0;
+    const optimisticOwner: RecipeOwner = currentUserId
+      ? {
+          id: currentUserId,
+          name: session?.user?.name ?? null,
+          email: session?.user?.email ?? null,
+        }
+      : null;
+    const optimisticRecipe: Recipe = {
+      id: generateRecipeId(),
+      title: trimmedTitle,
+      summary: payload.summary,
+      ingredients,
+      tags,
+      isFavorite: false,
+      order: nextRemoteOrder,
+      owner: optimisticOwner,
+    };
+    const previousRecipes = recipes;
+    setRecipes((current) => [optimisticRecipe, ...current]);
+
     try {
-      const response = await fetch("/api/recipes", {
+      const requestBody: Record<string, unknown> = {
+        id: optimisticRecipe.id,
+        ...payload,
+      };
+      if (shareTargetOwnerId) {
+        requestBody.shareWithOwnerId = shareTargetOwnerId;
+      }
+      if (collaboratorIdsPayload) {
+        requestBody.collaboratorIds = collaboratorIdsPayload;
+      }
+
+      const result = await sendOrQueueRequest({
+        url: "/api/recipes",
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(
-          shareTargetOwnerId
-            ? {
-                ...payload,
-                shareWithOwnerId: shareTargetOwnerId,
-                collaboratorIds: collaboratorIdsPayload,
-              }
-            : payload
-        ),
+        body: JSON.stringify(requestBody),
       });
-      const body = (await response.json().catch(() => null)) as {
-        recipe?: Recipe;
-        error?: string;
-      } | null;
-      if (!response.ok || !body?.recipe) {
+
+      if (result.response && !result.response.ok) {
+        const body = (await result.response.json().catch(() => null)) as {
+          error?: string;
+        } | null;
         throw new Error(body?.error ?? "Failed to save recipe");
       }
-      const savedRecipe = normalizeRecipe(body.recipe as StoredRecipe);
-      setRecipes((current) => [savedRecipe, ...current]);
+
+      if (!result.queued && result.response) {
+        const body = (await result.response.json().catch(() => null)) as {
+          recipe?: StoredRecipe;
+          error?: string;
+        } | null;
+        if (!body?.recipe) {
+          throw new Error(body?.error ?? "Failed to save recipe");
+        }
+        const savedRecipe = normalizeRecipe(body.recipe as StoredRecipe);
+        setRecipes((current) =>
+          current.map((existing) =>
+            existing.id === optimisticRecipe.id ? savedRecipe : existing
+          )
+        );
+      }
+
       resetFormState();
       const collaboratorDescriptor = shouldShareCollaborators
         ? summarizeCollaborators(activeListCollaborators)
@@ -726,13 +889,17 @@ export default function HomePage() {
         ? ` plus ${collaboratorDescriptor}`
         : "";
       const toastMessage = shareRecipientLabel
-        ? `${savedRecipe.title} is ready and now shared with ${shareRecipientLabel}${collaboratorSuffix}.`
+        ? `${optimisticRecipe.title} is ready and now shared with ${shareRecipientLabel}${collaboratorSuffix}.`
         : collaboratorDescriptor
-        ? `${savedRecipe.title} is ready and now shared with ${collaboratorDescriptor}.`
-        : `${savedRecipe.title} is ready. Send it to your list when needed.`;
-      showToast(toastMessage);
+        ? `${optimisticRecipe.title} is ready and now shared with ${collaboratorDescriptor}.`
+        : `${optimisticRecipe.title} is ready. Send it to your list when needed.`;
+      const offlineSuffix = result.queued
+        ? " We'll sync when you're back online."
+        : "";
+      showToast(`${toastMessage}${offlineSuffix}`);
     } catch (error) {
       console.error("Failed to save recipe", error);
+      setRecipes(previousRecipes);
       showToast("Unable to save recipe right now. Please retry.", "error");
     } finally {
       setIsSaving(false);
@@ -785,31 +952,44 @@ export default function HomePage() {
       )
     );
     try {
-      const response = await fetch("/api/recipes", {
+      const result = await sendOrQueueRequest({
+        url: "/api/recipes",
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ id: recipe.id, isFavorite: nextFavorite }),
       });
-      const body = (await response.json().catch(() => null)) as {
-        recipe?: Recipe;
-        error?: string;
-      } | null;
-      if (!response.ok || !body?.recipe) {
+      if (result.response && !result.response.ok) {
+        const body = (await result.response.json().catch(() => null)) as {
+          error?: string;
+        } | null;
         throw new Error(body?.error ?? "Failed to update favorite state");
       }
-      const updatedServerRecipe = normalizeRecipe(body.recipe as StoredRecipe);
-      setRecipes((current) =>
-        current.map((existing) =>
-          existing.id === recipe.id
-            ? { ...existing, isFavorite: updatedServerRecipe.isFavorite }
-            : existing
-        )
-      );
-      showToast(
-        updatedServerRecipe.isFavorite
-          ? `${recipe.title} marked as a favorite.`
-          : `${recipe.title} removed from favorites.`
-      );
+      if (!result.queued && result.response) {
+        const body = (await result.response.json().catch(() => null)) as {
+          recipe?: StoredRecipe;
+          error?: string;
+        } | null;
+        if (!body?.recipe) {
+          throw new Error(body?.error ?? "Failed to update favorite state");
+        }
+        const updatedServerRecipe = normalizeRecipe(
+          body.recipe as StoredRecipe
+        );
+        setRecipes((current) =>
+          current.map((existing) =>
+            existing.id === recipe.id
+              ? { ...existing, isFavorite: updatedServerRecipe.isFavorite }
+              : existing
+          )
+        );
+      }
+      const successMessage = nextFavorite
+        ? `${recipe.title} marked as a favorite.`
+        : `${recipe.title} removed from favorites.`;
+      const offlineSuffix = result.queued
+        ? " We'll sync when you're back online."
+        : "";
+      showToast(`${successMessage}${offlineSuffix}`);
     } catch (error) {
       console.error("Failed to toggle favorite", error);
       setRecipes((current) =>
@@ -861,18 +1041,25 @@ export default function HomePage() {
       );
 
       try {
-        const response = await fetch("/api/recipes", {
+        const result = await sendOrQueueRequest({
+          url: "/api/recipes",
           method: "DELETE",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ id: recipe.id }),
         });
-        const body = (await response.json().catch(() => null)) as {
-          error?: string;
-        } | null;
-        if (!response.ok) {
+        if (result.response && !result.response.ok) {
+          const body = (await result.response.json().catch(() => null)) as {
+            error?: string;
+          } | null;
           throw new Error(body?.error ?? "Failed to delete recipe");
         }
-        showToast(`${recipe.title} was removed from your library.`, "info");
+        const offlineSuffix = result.queued
+          ? " We'll sync when you're back online."
+          : "";
+        showToast(
+          `${recipe.title} was removed from your library.${offlineSuffix}`,
+          "info"
+        );
       } catch (error) {
         console.error("Failed to delete recipe", error);
         setRecipes(previousRecipes);
