@@ -1,6 +1,5 @@
 "use client";
 
-import Link from "next/link";
 import {
   useCallback,
   useEffect,
@@ -10,15 +9,12 @@ import {
   type DragEvent,
   type FormEvent,
 } from "react";
-import { signIn, signOut, useSession } from "next-auth/react";
+import { useSession } from "next-auth/react";
 import { useShoppingList } from "@/components/shopping-list-context";
-import { CollaborationInviteDialog } from "@/components/collaboration-invite-dialog";
-import { CollaboratorRosterDialog } from "@/components/collaborator-roster-dialog";
+import { useCollaborationUI } from "@/components/collaboration-ui-context";
+import { AppNav } from "@/components/app-nav";
 import { useToast } from "@/components/toast-provider";
-import type {
-  CollaborationRoster,
-  CollaboratorSummary,
-} from "@/types/collaboration";
+import type { CollaboratorSummary } from "@/types/collaboration";
 
 type RecipeOwner = {
   id: string;
@@ -37,20 +33,6 @@ type Recipe = {
   updatedAt: string;
   updatedBy: RecipeOwner;
   updatedById: string | null;
-};
-
-type InviteTarget = {
-  resourceType: "RECIPE" | "SHOPPING_LIST";
-  resourceId: string;
-  resourceLabel: string;
-  description?: string;
-};
-
-type CollaboratorRosterModalConfig = {
-  title: string;
-  collaborators: CollaboratorSummary[];
-  resourceType: "RECIPE" | "SHOPPING_LIST";
-  resourceId: string;
 };
 
 type StoredRecipe = {
@@ -275,6 +257,12 @@ export default function HomePage() {
   const isAuthenticated = status === "authenticated";
   const isSessionLoading = status === "loading";
   const { showToast } = useToast();
+  const {
+    collaborationRoster,
+    refreshCollaborations,
+    openInviteDialog,
+    openRosterDialog,
+  } = useCollaborationUI();
   const [recipes, setRecipes] = useState<Recipe[]>(starterRecipes);
   const [form, setForm] = useState(emptyForm);
   const [isSyncing, setIsSyncing] = useState(false);
@@ -302,18 +290,6 @@ export default function HomePage() {
   const [sortPreferenceLoaded, setSortPreferenceLoaded] = useState(false);
   const [draggingRecipeId, setDraggingRecipeId] = useState<string | null>(null);
   const [hasHydrated, setHasHydrated] = useState(false);
-  const [inviteTarget, setInviteTarget] = useState<InviteTarget | null>(null);
-  const [collaborationRoster, setCollaborationRoster] =
-    useState<CollaborationRoster | null>(null);
-  const [isCollaborationsLoading, setIsCollaborationsLoading] = useState(false);
-  const [isListMenuOpen, setIsListMenuOpen] = useState(false);
-  const [isNavMenuOpen, setIsNavMenuOpen] = useState(false);
-  const [rosterModal, setRosterModal] =
-    useState<CollaboratorRosterModalConfig | null>(null);
-  const [removingCollaboratorId, setRemovingCollaboratorId] = useState<
-    string | null
-  >(null);
-  const listMenuRef = useRef<HTMLDivElement | null>(null);
   const recipeUpdateLedgerRef = useRef<Map<string, string>>(new Map());
   const hasPrimedRecipeLedgerRef = useRef(false);
   const currentUserId = session?.user?.id ?? null;
@@ -344,12 +320,6 @@ export default function HomePage() {
   useEffect(() => {
     setShareWithCurrentCollaborators(true);
   }, [activeShoppingList?.ownerId]);
-  const shoppingListDestinationLabel =
-    activeShoppingList?.ownerLabel ??
-    (isAuthenticated ? "your list" : "this device");
-  const canShareShoppingList = Boolean(
-    isAuthenticated && activeShoppingList?.isSelf && currentUserId
-  );
   const recipeCollaboratorLookup = useMemo(() => {
     const map = new Map<string, CollaboratorSummary[]>();
     collaborationRoster?.recipes.forEach((entry) => {
@@ -379,34 +349,6 @@ export default function HomePage() {
       activeShoppingList?.isSelf &&
       activeListCollaborators.length > 0
   );
-
-  const refreshCollaborations = useCallback(async () => {
-    if (!isAuthenticated) {
-      setCollaborationRoster(null);
-      return;
-    }
-    setIsCollaborationsLoading(true);
-    try {
-      const response = await fetch("/api/collaborations", {
-        cache: "no-store",
-      });
-      const body = (await response.json().catch(() => null)) as
-        | CollaborationRoster
-        | { error?: string }
-        | null;
-      if (!response.ok || !body || ("error" in body && body.error)) {
-        throw new Error(body && "error" in body ? body.error : undefined);
-      }
-      if ("error" in body) {
-        throw new Error(body.error);
-      }
-      setCollaborationRoster(body as CollaborationRoster);
-    } catch (error) {
-      console.error("Failed to load collaboration roster", error);
-    } finally {
-      setIsCollaborationsLoading(false);
-    }
-  }, [isAuthenticated]);
 
   const noteCollaboratorRecipeUpdates = useCallback(
     (incoming: Recipe[], options?: { suppressNotifications?: boolean }) => {
@@ -448,33 +390,6 @@ export default function HomePage() {
       hasPrimedRecipeLedgerRef.current = true;
     },
     [currentUserId, isAuthenticated, showToast]
-  );
-
-  const handleInviteSubmit = useCallback(
-    async (email: string) => {
-      const target = inviteTarget;
-      if (!target) {
-        throw new Error("Select something to share first");
-      }
-      const response = await fetch("/api/collaborations", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          resourceType: target.resourceType,
-          resourceId: target.resourceId,
-          email,
-        }),
-      });
-      const body = (await response.json().catch(() => null)) as {
-        error?: string;
-      } | null;
-      if (!response.ok) {
-        throw new Error(body?.error ?? "Failed to send invite");
-      }
-      showToast(`Shared ${target.resourceLabel} with ${email}.`);
-      void refreshCollaborations();
-    },
-    [inviteTarget, refreshCollaborations, showToast]
   );
 
   const fetchRemoteRecipes = useCallback(
@@ -557,80 +472,6 @@ export default function HomePage() {
   useEffect(() => {
     setHasHydrated(true);
   }, []);
-
-  useEffect(() => {
-    if (!isListMenuOpen) {
-      return;
-    }
-    const handleClick = (event: MouseEvent) => {
-      if (!listMenuRef.current?.contains(event.target as Node)) {
-        setIsListMenuOpen(false);
-      }
-    };
-    document.addEventListener("mousedown", handleClick);
-    return () => document.removeEventListener("mousedown", handleClick);
-  }, [isListMenuOpen]);
-
-  const openRosterDialog = useCallback(
-    (config: CollaboratorRosterModalConfig) => {
-      setRosterModal(config);
-    },
-    []
-  );
-
-  const closeRosterModal = useCallback(() => {
-    setRosterModal(null);
-    setRemovingCollaboratorId(null);
-  }, []);
-
-  const handleRemoveCollaborator = useCallback(
-    async (collaboratorId: string) => {
-      const modalContext = rosterModal;
-      if (!modalContext) {
-        return;
-      }
-      setRemovingCollaboratorId(collaboratorId);
-      try {
-        const response = await fetch("/api/collaborations", {
-          method: "DELETE",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            resourceType: modalContext.resourceType,
-            resourceId: modalContext.resourceId,
-            collaboratorId,
-          }),
-        });
-        const body = (await response.json().catch(() => null)) as {
-          error?: string;
-        } | null;
-        if (!response.ok) {
-          throw new Error(body?.error ?? "Failed to remove collaborator");
-        }
-        setRosterModal((current) =>
-          current
-            ? {
-                ...current,
-                collaborators: current.collaborators.filter(
-                  (entry) => entry.id !== collaboratorId
-                ),
-              }
-            : current
-        );
-        showToast("Collaborator removed.", "info");
-        void refreshCollaborations();
-      } catch (error) {
-        console.error("Failed to remove collaborator", error);
-        const message =
-          error instanceof Error
-            ? error.message
-            : "Unable to remove collaborator.";
-        showToast(message, "error");
-      } finally {
-        setRemovingCollaboratorId(null);
-      }
-    },
-    [refreshCollaborations, rosterModal, showToast]
-  );
 
   useEffect(() => {
     void refreshCollaborations();
@@ -1300,243 +1141,7 @@ export default function HomePage() {
   return (
     <div className="min-h-screen bg-gradient-to-br from-amber-50 via-rose-50 to-white px-4 py-12 text-slate-900">
       <main className="mx-auto flex w-full max-w-5xl flex-col gap-10">
-        <header className="relative z-50 rounded-3xl border border-white/60 bg-white/90 p-5 shadow-xl shadow-rose-100/50 backdrop-blur">
-          <nav className="flex flex-wrap items-center justify-between gap-3 text-sm">
-            <div className="flex flex-nowrap items-center gap-4">
-              <div className="flex flex-col leading-tight">
-                <p className="text-[11px] font-semibold uppercase tracking-[0.35em] text-rose-500">
-                  Recipe Organizer
-                </p>
-                <p className="text-base font-semibold text-slate-900">
-                  {isAuthenticated ? accountLabel : "Guest mode"}
-                </p>
-              </div>
-              {isAuthenticated && lists.length > 0 && (
-                <div className="relative" ref={listMenuRef}>
-                  <button
-                    type="button"
-                    aria-haspopup="menu"
-                    aria-expanded={isListMenuOpen}
-                    onClick={() => setIsListMenuOpen((current) => !current)}
-                    className="inline-flex items-center gap-2 rounded-xl border border-slate-200 bg-white/70 px-3 py-2 text-left font-semibold text-slate-700 shadow-inner shadow-white/60 transition hover:border-slate-300"
-                  >
-                    <span className="flex flex-col leading-tight">
-                      <span className="text-[9px] font-semibold uppercase tracking-[0.35em] text-slate-400">
-                        Active list
-                      </span>
-                      <span className="text-slate-900">
-                        {shoppingListDestinationLabel}
-                      </span>
-                    </span>
-                    <svg
-                      className={`h-4 w-4 text-slate-500 transition ${
-                        isListMenuOpen ? "rotate-180" : ""
-                      }`}
-                      viewBox="0 0 20 20"
-                      fill="currentColor"
-                      aria-hidden="true"
-                    >
-                      <path d="M5.23 7.21a.75.75 0 0 1 1.06.02L10 10.585l3.71-3.355a.75.75 0 0 1 1.02 1.1l-4.23 3.83a.75.75 0 0 1-1.02 0l-4.23-3.83a.75.75 0 0 1 .02-1.1z" />
-                    </svg>
-                  </button>
-                  {isListMenuOpen && (
-                    <div className="absolute left-0 z-50 mt-3 w-72 rounded-3xl border border-slate-100 bg-white/95 p-4 text-sm text-slate-600 shadow-2xl shadow-slate-200/80">
-                      {activeShoppingList ? (
-                        <>
-                          <p className="text-base font-semibold text-slate-900">
-                            {shoppingListDestinationLabel}
-                          </p>
-                          <p className="text-xs text-slate-500">
-                            {activeShoppingList.isSelf
-                              ? "Owned by you"
-                              : `Shared from ${activeShoppingList.ownerLabel}`}
-                          </p>
-                        </>
-                      ) : (
-                        <p className="text-slate-500">
-                          Select a list to manage it here.
-                        </p>
-                      )}
-                      {lists.length > 1 && (
-                        <div className="mt-4 flex flex-col gap-2">
-                          {lists.map((list) => {
-                            const isSelected =
-                              list.ownerId ===
-                              (activeShoppingList?.ownerId ?? selectedListId);
-                            return (
-                              <button
-                                key={list.ownerId}
-                                type="button"
-                                onClick={() => {
-                                  selectList(list.ownerId);
-                                  setIsListMenuOpen(false);
-                                }}
-                                className={`rounded-2xl border px-3 py-2 text-left text-xs font-semibold uppercase tracking-[0.2em] transition ${
-                                  isSelected
-                                    ? "border-slate-900 bg-slate-900 text-white"
-                                    : "border-slate-200 bg-white text-slate-600 hover:border-slate-300"
-                                }`}
-                              >
-                                {list.ownerLabel}
-                              </button>
-                            );
-                          })}
-                        </div>
-                      )}
-                      {canShareShoppingList && activeShoppingList && (
-                        <div className="mt-4 flex flex-wrap gap-2">
-                          <button
-                            type="button"
-                            onClick={() => {
-                              if (!currentUserId) {
-                                return;
-                              }
-                              setIsListMenuOpen(false);
-                              openRosterDialog({
-                                title: `${activeShoppingList.ownerLabel}'s list`,
-                                collaborators: shoppingListCollaborators,
-                                resourceType: "SHOPPING_LIST",
-                                resourceId: currentUserId,
-                              });
-                            }}
-                            disabled={isCollaborationsLoading}
-                            className={`rounded-2xl border px-3 py-2 text-xs font-semibold uppercase tracking-[0.25em] transition ${
-                              isCollaborationsLoading
-                                ? "border-slate-200 text-slate-400"
-                                : "border-slate-200 text-slate-600 hover:border-slate-300"
-                            }`}
-                          >
-                            {isCollaborationsLoading
-                              ? "Loading…"
-                              : "View collaborators"}
-                          </button>
-                          <button
-                            type="button"
-                            onClick={() => {
-                              if (!currentUserId) {
-                                return;
-                              }
-                              setIsListMenuOpen(false);
-                              setInviteTarget({
-                                resourceType: "SHOPPING_LIST",
-                                resourceId: currentUserId,
-                                resourceLabel: `${activeShoppingList.ownerLabel}'s list`,
-                                description:
-                                  "Collaborators can add, remove, and reorder items on this list.",
-                              });
-                            }}
-                            className="rounded-2xl bg-rose-500 px-3 py-2 text-xs font-semibold uppercase tracking-[0.3em] text-white shadow-lg shadow-rose-200/80 transition hover:scale-[1.01]"
-                          >
-                            Invite
-                          </button>
-                        </div>
-                      )}
-                    </div>
-                  )}
-                </div>
-              )}
-            </div>
-            <div className="flex items-center gap-2">
-              <button
-                type="button"
-                className="inline-flex items-center justify-center rounded-xl border border-slate-200 bg-white/70 px-3 py-2 text-sm font-semibold text-slate-700 shadow-inner shadow-white/60 transition hover:border-slate-300 md:hidden"
-                onClick={() => setIsNavMenuOpen((current) => !current)}
-                aria-expanded={isNavMenuOpen}
-                aria-controls="nav-quick-actions"
-              >
-                {isNavMenuOpen ? "Close" : "Menu"}
-              </button>
-              <div className="hidden flex-nowrap items-center gap-2 md:flex">
-                {isAuthenticated && (
-                  <Link
-                    href="/shopping-list"
-                    className="inline-flex h-11 items-center justify-center rounded-xl bg-slate-900 px-5 text-sm font-semibold text-white shadow-lg shadow-slate-900/20 transition hover:-translate-y-0.5"
-                  >
-                    Shopping list ({shoppingListTotal})
-                  </Link>
-                )}
-                {isAdmin && (
-                  <Link
-                    href="/whitelist"
-                    className="inline-flex h-11 items-center justify-center rounded-xl border border-slate-300 bg-white/80 px-5 text-sm font-semibold text-slate-800 shadow-inner shadow-slate-100 transition hover:border-slate-400"
-                  >
-                    Admin whitelist
-                  </Link>
-                )}
-                <div className="group relative inline-flex h-11 items-center justify-center rounded-xl border border-emerald-300 bg-white/70 px-5 text-xs font-semibold uppercase tracking-[0.35em] text-emerald-600">
-                  {isAuthenticated ? "Synced" : "Local"}
-                  <div className="pointer-events-none absolute top-full mt-2 hidden w-64 rounded-2xl border border-emerald-100 bg-white/95 p-3 text-left text-xs font-medium normal-case tracking-normal text-slate-600 shadow-xl shadow-emerald-100/70 group-hover:block">
-                    {isAuthenticated
-                      ? "Recipes and lists back up automatically across your devices."
-                      : "We will sync this library across devices when you sign in."}
-                  </div>
-                </div>
-                <button
-                  type="button"
-                  disabled={isSessionLoading}
-                  onClick={() => {
-                    if (isAuthenticated) {
-                      void signOut();
-                    } else {
-                      void signIn("google");
-                    }
-                  }}
-                  className="inline-flex h-11 items-center justify-center rounded-xl border border-slate-200 bg-white/70 px-5 text-sm font-semibold text-slate-700 shadow-inner shadow-white/60 transition hover:border-slate-300 disabled:cursor-not-allowed disabled:opacity-70"
-                >
-                  {isAuthenticated ? "Sign out" : "Sign in with Google"}
-                </button>
-              </div>
-            </div>
-          </nav>
-          {isNavMenuOpen && (
-            <div
-              id="nav-quick-actions"
-              className="mt-3 flex flex-col gap-3 rounded-2xl border border-slate-200 bg-white/95 p-4 text-sm text-slate-700 md:hidden"
-            >
-              {isAuthenticated && (
-                <Link
-                  href="/shopping-list"
-                  onClick={() => setIsNavMenuOpen(false)}
-                  className="inline-flex w-full items-center justify-center rounded-xl bg-slate-900 px-4 py-2 text-sm font-semibold text-white shadow-lg shadow-slate-900/20 transition hover:-translate-y-0.5"
-                >
-                  Shopping list ({shoppingListTotal})
-                </Link>
-              )}
-              {isAdmin && (
-                <Link
-                  href="/whitelist"
-                  onClick={() => setIsNavMenuOpen(false)}
-                  className="inline-flex w-full items-center justify-center rounded-xl border border-slate-300 bg-white/80 px-4 py-2 text-sm font-semibold text-slate-800 shadow-inner shadow-slate-100 transition hover:border-slate-400"
-                >
-                  Admin whitelist
-                </Link>
-              )}
-              <div className="rounded-xl border border-emerald-300 bg-white/70 px-3 py-2 text-center text-xs font-semibold uppercase tracking-[0.35em] text-emerald-600">
-                {isAuthenticated ? "Synced" : "Local"}
-              </div>
-              <p className="text-xs text-slate-500">
-                {isAuthenticated
-                  ? "Recipes and lists back up automatically across your devices."
-                  : "We will sync this library across devices when you sign in."}
-              </p>
-              <button
-                type="button"
-                disabled={isSessionLoading}
-                onClick={() => {
-                  if (isAuthenticated) {
-                    void signOut();
-                  } else {
-                    void signIn("google");
-                  }
-                  setIsNavMenuOpen(false);
-                }}
-                className="inline-flex w-full items-center justify-center rounded-xl border border-slate-200 bg-white/70 px-4 py-2 text-sm font-semibold text-slate-700 shadow-inner shadow-white/60 transition hover:border-slate-300 disabled:cursor-not-allowed disabled:opacity-70"
-              >
-                {isAuthenticated ? "Sign out" : "Sign in with Google"}
-              </button>
-            </div>
-          )}
-        </header>
+        <AppNav />
 
         <section className="mt-2 grid gap-10 lg:grid-cols-[1.1fr_0.9fr]">
           <form
@@ -1930,7 +1535,7 @@ export default function HomePage() {
                                 className="flex w-full items-center justify-between rounded-xl px-3 py-2 text-left transition hover:bg-slate-50"
                                 onClick={() => {
                                   setActionsMenuRecipeId(null);
-                                  setInviteTarget({
+                                  openInviteDialog({
                                     resourceType: "RECIPE",
                                     resourceId: recipe.id,
                                     resourceLabel: recipe.title,
@@ -2031,33 +1636,6 @@ export default function HomePage() {
           </div>
         </section>
       </main>
-      <CollaborationInviteDialog
-        open={Boolean(inviteTarget)}
-        title={
-          inviteTarget?.resourceType === "SHOPPING_LIST"
-            ? "Share your shopping list"
-            : "Share this recipe"
-        }
-        description={
-          inviteTarget?.description ??
-          (inviteTarget?.resourceType === "SHOPPING_LIST"
-            ? "Invite someone to edit and organize groceries with you."
-            : "Give another cook edit access to this recipe.")
-        }
-        resourceLabel={inviteTarget?.resourceLabel ?? ""}
-        onClose={() => setInviteTarget(null)}
-        onSubmit={handleInviteSubmit}
-      />
-      <CollaboratorRosterDialog
-        open={Boolean(rosterModal)}
-        title={rosterModal?.title ?? ""}
-        collaborators={rosterModal?.collaborators ?? []}
-        onClose={closeRosterModal}
-        onRemoveCollaborator={
-          rosterModal ? handleRemoveCollaborator : undefined
-        }
-        removingCollaboratorId={removingCollaboratorId}
-      />
       {pendingDeletionRecipe && (
         <div className="fixed inset-0 z-40 flex items-center justify-center px-4 py-8">
           <div

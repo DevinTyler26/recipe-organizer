@@ -3,6 +3,7 @@ import { Geist, Geist_Mono } from "next/font/google";
 import { ShoppingListProvider } from "@/components/shopping-list-context";
 import { AuthSessionProvider } from "@/components/session-provider";
 import { ToastProvider } from "@/components/toast-provider";
+import { CollaborationUIProvider } from "@/components/collaboration-ui-context";
 import "./globals.css";
 
 const geistSans = Geist({
@@ -33,7 +34,9 @@ export default function RootLayout({
       >
         <AuthSessionProvider>
           <ToastProvider>
-            <ShoppingListProvider>{children}</ShoppingListProvider>
+            <CollaborationUIProvider>
+              <ShoppingListProvider>{children}</ShoppingListProvider>
+            </CollaborationUIProvider>
           </ToastProvider>
         </AuthSessionProvider>
       </body>

@@ -5,15 +5,16 @@ import { signIn, useSession } from "next-auth/react";
 import {
   useCallback,
   useEffect,
+  useMemo,
   useState,
   type DragEvent,
   type FormEvent,
 } from "react";
+import { AppNav } from "@/components/app-nav";
+import { useCollaborationUI } from "@/components/collaboration-ui-context";
 import { useShoppingList } from "@/components/shopping-list-context";
 import { useToast } from "@/components/toast-provider";
-import { CollaborationInviteDialog } from "@/components/collaboration-invite-dialog";
 import { formatCollaboratorLabel } from "@/lib/collaborator-label";
-import type { CollaborationRoster } from "@/types/collaboration";
 
 export default function ShoppingListPage() {
   const { data: session, status } = useSession();
@@ -34,12 +35,13 @@ export default function ShoppingListPage() {
     acknowledgeExternalUpdate,
   } = useShoppingList();
   const { showToast } = useToast();
+  const {
+    collaborationRoster,
+    isCollaborationsLoading,
+    refreshCollaborations,
+    openInviteDialog,
+  } = useCollaborationUI();
   const [draggingKey, setDraggingKey] = useState<string | null>(null);
-  const [isInviteOpen, setIsInviteOpen] = useState(false);
-  const [inviteNotice, setInviteNotice] = useState<{
-    message: string;
-    tone: "success" | "error";
-  } | null>(null);
   const [quantityEditor, setQuantityEditor] = useState<{
     key: string;
     ownerId: string | null;
@@ -47,9 +49,7 @@ export default function ShoppingListPage() {
   } | null>(null);
   const [quantityError, setQuantityError] = useState<string | null>(null);
   const [isQuantitySaving, setIsQuantitySaving] = useState(false);
-  const [collaborationRoster, setCollaborationRoster] =
-    useState<CollaborationRoster | null>(null);
-  const [isCollaborationsLoading, setIsCollaborationsLoading] = useState(false);
+  const [hasHydrated, setHasHydrated] = useState(false);
   const activeList =
     lists.find((list) => list.ownerId === selectedListId) ?? lists[0] ?? null;
   const activeOwnerId = activeList?.ownerId ?? null;
@@ -65,42 +65,6 @@ export default function ShoppingListPage() {
       ? collaborationRoster.shoppingList.collaborators
       : [];
   const emptyState = items.length === 0;
-  const showEmptyState = emptyState && !isSyncing;
-  const syncStatusLabel = isAuthenticated
-    ? isRemote
-      ? activeList?.isSelf
-        ? "Synced to your account"
-        : `Shared from ${activeListLabel}`
-      : "Syncing your shared lists"
-    : "Local to this device";
-  const refreshCollaborations = useCallback(async () => {
-    if (!isAuthenticated) {
-      setCollaborationRoster(null);
-      return;
-    }
-    setIsCollaborationsLoading(true);
-    try {
-      const response = await fetch("/api/collaborations", {
-        cache: "no-store",
-      });
-      const body = (await response.json().catch(() => null)) as
-        | CollaborationRoster
-        | { error?: string }
-        | null;
-      if (!response.ok || !body || ("error" in body && body.error)) {
-        throw new Error(body && "error" in body ? body.error : undefined);
-      }
-      if ("error" in body) {
-        throw new Error(body.error);
-      }
-      setCollaborationRoster(body as CollaborationRoster);
-    } catch (error) {
-      console.error("Failed to load collaboration roster", error);
-    } finally {
-      setIsCollaborationsLoading(false);
-    }
-  }, [isAuthenticated]);
-
   const beginDrag = (key: string, event: DragEvent<HTMLLIElement>) => {
     setDraggingKey(key);
     event.dataTransfer.effectAllowed = "move";
@@ -146,35 +110,6 @@ export default function ShoppingListPage() {
     reorderRelative(null, true);
   };
 
-  const handleInviteSubmit = useCallback(
-    async (email: string) => {
-      if (!currentUserId) {
-        throw new Error("Sign in to share your shopping list");
-      }
-      const response = await fetch("/api/collaborations", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          resourceType: "SHOPPING_LIST",
-          resourceId: currentUserId,
-          email,
-        }),
-      });
-      const body = (await response.json().catch(() => null)) as {
-        error?: string;
-      } | null;
-      if (!response.ok) {
-        throw new Error(body?.error ?? "Failed to send invite");
-      }
-      setInviteNotice({
-        message: `Shared your shopping list with ${email}.`,
-        tone: "success",
-      });
-      void refreshCollaborations();
-    },
-    [currentUserId, refreshCollaborations]
-  );
-
   useEffect(() => {
     void refreshCollaborations();
   }, [isAuthenticated, refreshCollaborations]);
@@ -189,12 +124,6 @@ export default function ShoppingListPage() {
     showToast(`A collaborator updated ${listLabel}.`, "info");
     acknowledgeExternalUpdate();
   }, [acknowledgeExternalUpdate, externalUpdateNotice, showToast]);
-
-  useEffect(() => {
-    if (!inviteNotice) return;
-    const timeoutId = window.setTimeout(() => setInviteNotice(null), 4000);
-    return () => window.clearTimeout(timeoutId);
-  }, [inviteNotice]);
 
   useEffect(() => {
     if (
@@ -272,47 +201,67 @@ export default function ShoppingListPage() {
     [quantityEditor, updateQuantity]
   );
 
+  useEffect(() => {
+    setHasHydrated(true);
+  }, []);
+
+  const heroStatusText = useMemo(() => {
+    if (!hasHydrated) {
+      return "Loading your list…";
+    }
+    if (emptyState) {
+      return "No ingredients queued yet.";
+    }
+    return `${totalItems} item${totalItems === 1 ? "" : "s"} ready to shop.`;
+  }, [emptyState, hasHydrated, totalItems]);
+
+  const renderItems = hasHydrated ? items : [];
+  const renderLists = hasHydrated ? lists : [];
+  const renderActiveList = hasHydrated ? activeList : null;
+  const renderEmptyState = hasHydrated ? emptyState : true;
+  const renderCanShareActiveList = hasHydrated ? canShareActiveList : false;
+  const showEmptyState = renderEmptyState && !isSyncing;
+  const totalItemsLabel = hasHydrated
+    ? `${totalItems} item${totalItems === 1 ? "" : "s"}`
+    : "—";
+  const clearButtonDisabled =
+    !hasHydrated || renderEmptyState || isSyncing || !activeOwnerId;
+
   return (
     <div className="min-h-screen bg-gradient-to-br from-amber-50 via-rose-50 to-white px-4 py-12 text-slate-900">
-      <main className="mx-auto flex w-full max-w-4xl flex-col gap-10">
-        <header className="rounded-3xl border border-white/60 bg-white/85 p-8 shadow-xl shadow-rose-100/60 backdrop-blur">
-          <p className="text-sm font-semibold uppercase tracking-[0.3em] text-rose-500">
-            Shopping list
-          </p>
-          <div className="mt-3 flex flex-col gap-4 sm:flex-row sm:items-end sm:justify-between">
+      <main className="mx-auto flex w-full max-w-5xl flex-col gap-10">
+        <AppNav />
+        <header className="rounded-3xl border border-white/60 bg-white/85 p-6 shadow-xl shadow-rose-100/60 backdrop-blur">
+          <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
             <div>
-              <h1 className="text-4xl font-semibold text-slate-900">
-                All your ingredients in one pulse.
+              <h1 className="text-3xl font-semibold text-slate-900">
+                Shopping list
               </h1>
-              <p className="mt-2 text-base text-slate-600">
-                {isSyncing
-                  ? "Syncing your latest shopping list entries..."
-                  : emptyState
-                  ? "Select a recipe on the home page to populate your list."
-                  : "Tap an item when you drop it in the cart or clear everything once you&rsquo;re done cooking."}
-              </p>
-              <p className="mt-1 text-xs font-semibold uppercase tracking-[0.3em] text-amber-500">
-                {syncStatusLabel}
+              <p
+                className="mt-1 text-sm text-slate-500"
+                suppressHydrationWarning
+              >
+                {heroStatusText}
               </p>
             </div>
-            <div className="flex gap-3">
+            <div className="flex flex-wrap gap-3 sm:justify-end">
               <Link
                 href="/"
-                className="inline-flex items-center justify-center rounded-2xl border border-slate-200 bg-white/70 px-5 py-3 text-sm font-semibold text-slate-700 shadow-sm shadow-white/60 transition hover:border-slate-300"
+                className="inline-flex items-center justify-center rounded-2xl border border-slate-200 bg-white/70 px-4 py-2 text-sm font-semibold text-slate-700 shadow-sm shadow-white/60 transition hover:border-slate-300"
               >
                 Back to recipes
               </Link>
               <button
                 type="button"
                 onClick={() => clearList(activeOwnerId ?? undefined)}
-                disabled={emptyState || isSyncing || !activeOwnerId}
-                className="inline-flex items-center justify-center rounded-2xl bg-slate-900 px-5 py-3 text-sm font-semibold text-white shadow-lg shadow-slate-900/25 transition disabled:cursor-not-allowed disabled:bg-slate-400"
+                disabled={clearButtonDisabled}
+                className="inline-flex items-center justify-center rounded-2xl bg-slate-900 px-4 py-2 text-sm font-semibold text-white shadow-lg shadow-slate-900/25 transition disabled:cursor-not-allowed disabled:bg-slate-400"
               >
-                {isSyncing ? "Syncing…" : `Clear list (${totalItems})`}
+                {isSyncing ? "Syncing…" : "Clear list"}
               </button>
             </div>
           </div>
-          {activeList && (
+          {renderActiveList && (
             <>
               <div className="mt-6 rounded-2xl border border-slate-100 bg-white/80 p-4 text-sm text-slate-600 shadow-inner shadow-white/60">
                 <div className="flex flex-wrap items-center justify-between gap-3">
@@ -322,7 +271,7 @@ export default function ShoppingListPage() {
                     </p>
                     <p className="mt-1 text-lg font-semibold text-slate-900">
                       {activeListLabel}
-                      {!activeList.isSelf && (
+                      {!renderActiveList.isSelf && (
                         <span className="ml-3 rounded-full bg-rose-100 px-3 py-0.5 text-[10px] font-semibold uppercase tracking-[0.3em] text-rose-500">
                           Shared
                         </span>
@@ -331,14 +280,22 @@ export default function ShoppingListPage() {
                   </div>
                   <div className="flex flex-col items-end gap-2 text-right">
                     <p className="text-xs font-semibold text-slate-500">
-                      {totalItems} item{totalItems === 1 ? "" : "s"}
+                      {totalItemsLabel}
                     </p>
-                    {canShareActiveList && (
+                    {renderCanShareActiveList && (
                       <button
                         type="button"
                         onClick={() => {
-                          setInviteNotice(null);
-                          setIsInviteOpen(true);
+                          if (!currentUserId || !renderActiveList) {
+                            return;
+                          }
+                          openInviteDialog({
+                            resourceType: "SHOPPING_LIST",
+                            resourceId: currentUserId,
+                            resourceLabel: renderActiveList.ownerLabel,
+                            description:
+                              "Collaborators can add, remove, and reorder items on this list.",
+                          });
                         }}
                         className="rounded-full border border-rose-200 px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.3em] text-rose-500 transition hover:bg-rose-50"
                       >
@@ -347,9 +304,9 @@ export default function ShoppingListPage() {
                     )}
                   </div>
                 </div>
-                {lists.length > 1 && (
+                {renderLists.length > 1 && (
                   <div className="mt-4 flex flex-wrap gap-3">
-                    {lists.map((list) => {
+                    {renderLists.map((list) => {
                       const isSelected = list.ownerId === activeOwnerId;
                       return (
                         <button
@@ -380,18 +337,7 @@ export default function ShoppingListPage() {
                   </div>
                 )}
               </div>
-              {inviteNotice && (
-                <div
-                  className={`mt-4 rounded-2xl border px-4 py-3 text-sm font-semibold ${
-                    inviteNotice.tone === "success"
-                      ? "border-emerald-200 bg-emerald-50 text-emerald-700"
-                      : "border-rose-200 bg-rose-50 text-rose-700"
-                  }`}
-                >
-                  {inviteNotice.message}
-                </div>
-              )}
-              {canShareActiveList && (
+              {renderCanShareActiveList && (
                 <div className="mt-4 rounded-2xl border border-rose-100 bg-rose-50/70 p-4 text-xs text-rose-600">
                   <p className="text-[10px] font-semibold uppercase tracking-[0.3em] text-rose-400">
                     Collaborators
@@ -447,7 +393,7 @@ export default function ShoppingListPage() {
                 here automatically.
               </p>
             </div>
-          ) : isSyncing && emptyState ? (
+          ) : isSyncing && renderEmptyState ? (
             <div className="flex flex-col items-center gap-4 text-center text-slate-500">
               <div className="text-6xl animate-pulse">🛒</div>
               <p className="text-lg font-medium">Syncing your list…</p>
@@ -463,7 +409,7 @@ export default function ShoppingListPage() {
               }}
               onDrop={handleListDrop}
             >
-              {items.map((item) => (
+              {renderItems.map((item) => (
                 <li
                   key={item.id}
                   draggable
@@ -526,15 +472,15 @@ export default function ShoppingListPage() {
                       </form>
                     ) : (
                       <div className="mt-2 flex flex-wrap items-center gap-3 text-xs font-semibold text-slate-500">
-                        <span>{item.unitSummary}</span>
                         <button
                           type="button"
                           onClick={() =>
                             beginQuantityEdit(item.storageKey, item.unitSummary)
                           }
-                          className="rounded-full border border-slate-200 px-3 py-1 text-[10px] font-semibold uppercase tracking-[0.3em] text-slate-500 transition hover:border-slate-300"
+                          className="inline-flex items-center rounded-full border border-slate-200 bg-white/70 px-3 py-1 text-[10px] font-semibold uppercase tracking-[0.3em] text-slate-600 transition hover:border-slate-300 hover:text-slate-900"
+                          title="Adjust quantity"
                         >
-                          Adjust quantity
+                          {item.unitSummary}
                         </button>
                       </div>
                     )}
@@ -559,14 +505,6 @@ export default function ShoppingListPage() {
           )}
         </section>
       </main>
-      <CollaborationInviteDialog
-        open={isInviteOpen}
-        title="Share your shopping list"
-        description="Invite another cook to manage groceries with you."
-        resourceLabel={activeListLabel}
-        onClose={() => setIsInviteOpen(false)}
-        onSubmit={handleInviteSubmit}
-      />
     </div>
   );
 }
