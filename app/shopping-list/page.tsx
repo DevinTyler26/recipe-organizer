@@ -1,6 +1,7 @@
 "use client";
 
 import Link from "next/link";
+import { useRouter } from "next/navigation";
 import { signIn, useSession } from "next-auth/react";
 import {
   useCallback,
@@ -16,6 +17,7 @@ import type { CollaborationRoster } from "@/types/collaboration";
 
 export default function ShoppingListPage() {
   const { data: session, status } = useSession();
+  const router = useRouter();
   const isAuthenticated = status === "authenticated";
   const {
     items,
@@ -46,6 +48,10 @@ export default function ShoppingListPage() {
   const [collaborationRoster, setCollaborationRoster] =
     useState<CollaborationRoster | null>(null);
   const [isCollaborationsLoading, setIsCollaborationsLoading] = useState(false);
+  const [isOfflineMode, setIsOfflineMode] = useState(false);
+  const [offlineNavWarning, setOfflineNavWarning] = useState<string | null>(
+    null
+  );
   const activeList =
     lists.find((list) => list.ownerId === selectedListId) ?? lists[0] ?? null;
   const activeOwnerId = activeList?.ownerId ?? null;
@@ -176,6 +182,50 @@ export default function ShoppingListPage() {
   }, [isAuthenticated, refreshCollaborations]);
 
   useEffect(() => {
+    if (typeof window === "undefined") {
+      return;
+    }
+    const syncStatus = () => {
+      const offline = !window.navigator.onLine;
+      setIsOfflineMode(offline);
+      if (!offline) {
+        setOfflineNavWarning(null);
+      }
+    };
+    syncStatus();
+    window.addEventListener("online", syncStatus);
+    window.addEventListener("offline", syncStatus);
+    return () => {
+      window.removeEventListener("online", syncStatus);
+      window.removeEventListener("offline", syncStatus);
+    };
+  }, []);
+
+  useEffect(() => {
+    if (isOfflineMode) {
+      return;
+    }
+    const prefetchHome = async () => {
+      try {
+        await router.prefetch("/");
+      } catch (error) {
+        console.debug("Failed to prefetch home route", error);
+      }
+    };
+    void prefetchHome();
+  }, [isOfflineMode, router]);
+
+  const handleOfflineHomeNavigation = useCallback(() => {
+    if (typeof window !== "undefined" && window.history.length > 1) {
+      router.back();
+      return;
+    }
+    setOfflineNavWarning(
+      "Reconnect to open the recipe library. We'll keep your shopping list cached until then."
+    );
+  }, [router]);
+
+  useEffect(() => {
     if (!inviteNotice) return;
     const timeoutId = window.setTimeout(() => setInviteNotice(null), 4000);
     return () => window.clearTimeout(timeoutId);
@@ -283,6 +333,13 @@ export default function ShoppingListPage() {
             <div className="flex gap-3">
               <Link
                 href="/"
+                onClick={(event) => {
+                  if (!isOfflineMode) {
+                    return;
+                  }
+                  event.preventDefault();
+                  handleOfflineHomeNavigation();
+                }}
                 className="inline-flex items-center justify-center rounded-2xl border border-slate-200 bg-white/70 px-5 py-3 text-sm font-semibold text-slate-700 shadow-sm shadow-white/60 transition hover:border-slate-300"
               >
                 Back to recipes
@@ -296,6 +353,11 @@ export default function ShoppingListPage() {
                 {isSyncing ? "Syncing…" : `Clear list (${totalItems})`}
               </button>
             </div>
+            {offlineNavWarning && (
+              <p className="mt-2 text-xs font-semibold text-rose-500">
+                {offlineNavWarning}
+              </p>
+            )}
           </div>
           {activeList && (
             <>
