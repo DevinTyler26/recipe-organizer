@@ -49,6 +49,13 @@ type InviteTarget = {
   description?: string;
 };
 
+type CollaboratorRosterModalConfig = {
+  title: string;
+  collaborators: CollaboratorSummary[];
+  resourceType: "RECIPE" | "SHOPPING_LIST";
+  resourceId: string;
+};
+
 type StoredRecipe = Omit<Recipe, "tags" | "order"> & {
   tags?: string[];
   order?: number;
@@ -265,10 +272,12 @@ export default function HomePage() {
     useState<CollaborationRoster | null>(null);
   const [isCollaborationsLoading, setIsCollaborationsLoading] = useState(false);
   const [isListMenuOpen, setIsListMenuOpen] = useState(false);
-  const [rosterModal, setRosterModal] = useState<{
-    title: string;
-    collaborators: CollaboratorSummary[];
-  } | null>(null);
+  const [isNavMenuOpen, setIsNavMenuOpen] = useState(false);
+  const [rosterModal, setRosterModal] =
+    useState<CollaboratorRosterModalConfig | null>(null);
+  const [removingCollaboratorId, setRemovingCollaboratorId] = useState<
+    string | null
+  >(null);
   const listMenuRef = useRef<HTMLDivElement | null>(null);
   const currentUserId = session?.user?.id ?? null;
   const accountLabel = session?.user?.name || session?.user?.email || "Account";
@@ -450,10 +459,64 @@ export default function HomePage() {
   }, [isListMenuOpen]);
 
   const openRosterDialog = useCallback(
-    (title: string, collaborators: CollaboratorSummary[]) => {
-      setRosterModal({ title, collaborators });
+    (config: CollaboratorRosterModalConfig) => {
+      setRosterModal(config);
     },
     []
+  );
+
+  const closeRosterModal = useCallback(() => {
+    setRosterModal(null);
+    setRemovingCollaboratorId(null);
+  }, []);
+
+  const handleRemoveCollaborator = useCallback(
+    async (collaboratorId: string) => {
+      const modalContext = rosterModal;
+      if (!modalContext) {
+        return;
+      }
+      setRemovingCollaboratorId(collaboratorId);
+      try {
+        const response = await fetch("/api/collaborations", {
+          method: "DELETE",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            resourceType: modalContext.resourceType,
+            resourceId: modalContext.resourceId,
+            collaboratorId,
+          }),
+        });
+        const body = (await response.json().catch(() => null)) as {
+          error?: string;
+        } | null;
+        if (!response.ok) {
+          throw new Error(body?.error ?? "Failed to remove collaborator");
+        }
+        setRosterModal((current) =>
+          current
+            ? {
+                ...current,
+                collaborators: current.collaborators.filter(
+                  (entry) => entry.id !== collaboratorId
+                ),
+              }
+            : current
+        );
+        showToast("Collaborator removed.", "info");
+        void refreshCollaborations();
+      } catch (error) {
+        console.error("Failed to remove collaborator", error);
+        const message =
+          error instanceof Error
+            ? error.message
+            : "Unable to remove collaborator.";
+        showToast(message, "error");
+      } finally {
+        setRemovingCollaboratorId(null);
+      }
+    },
+    [refreshCollaborations, rosterModal, showToast]
   );
 
   useEffect(() => {
@@ -1101,29 +1164,29 @@ export default function HomePage() {
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-amber-50 via-rose-50 to-white px-4 py-12 text-slate-900">
-      <main className="mx-auto flex w-full max-w-5xl flex-col gap-12">
-        <header className="rounded-3xl border border-white/60 bg-white/85 p-8 shadow-xl shadow-rose-100/60 backdrop-blur">
-          <nav className="flex flex-wrap items-center justify-between gap-4 border-b border-white/60 pb-4">
-            <div>
-              <p className="text-xs font-semibold uppercase tracking-[0.35em] text-rose-500">
-                Recipe Organizer
-              </p>
-              <p className="mt-1 text-lg font-semibold text-slate-900">
-                {isAuthenticated ? accountLabel : "Guest mode"}
-              </p>
-            </div>
-            <div className="flex flex-wrap items-center gap-3">
-              {lists.length > 0 && (
+      <main className="mx-auto flex w-full max-w-5xl flex-col gap-10">
+        <header className="relative z-50 rounded-3xl border border-white/60 bg-white/90 p-5 shadow-xl shadow-rose-100/50 backdrop-blur">
+          <nav className="flex flex-wrap items-center justify-between gap-3 text-sm">
+            <div className="flex flex-nowrap items-center gap-4">
+              <div className="flex flex-col leading-tight">
+                <p className="text-[11px] font-semibold uppercase tracking-[0.35em] text-rose-500">
+                  Recipe Organizer
+                </p>
+                <p className="text-base font-semibold text-slate-900">
+                  {isAuthenticated ? accountLabel : "Guest mode"}
+                </p>
+              </div>
+              {isAuthenticated && lists.length > 0 && (
                 <div className="relative" ref={listMenuRef}>
                   <button
                     type="button"
                     aria-haspopup="menu"
                     aria-expanded={isListMenuOpen}
                     onClick={() => setIsListMenuOpen((current) => !current)}
-                    className="inline-flex items-center gap-3 rounded-2xl border border-slate-200 bg-white/70 px-4 py-2 text-left text-sm font-semibold text-slate-700 shadow-inner shadow-white/60 transition hover:border-slate-300"
+                    className="inline-flex items-center gap-2 rounded-xl border border-slate-200 bg-white/70 px-3 py-2 text-left font-semibold text-slate-700 shadow-inner shadow-white/60 transition hover:border-slate-300"
                   >
                     <span className="flex flex-col leading-tight">
-                      <span className="text-[10px] font-semibold uppercase tracking-[0.35em] text-slate-400">
+                      <span className="text-[9px] font-semibold uppercase tracking-[0.35em] text-slate-400">
                         Active list
                       </span>
                       <span className="text-slate-900">
@@ -1142,7 +1205,7 @@ export default function HomePage() {
                     </svg>
                   </button>
                   {isListMenuOpen && (
-                    <div className="absolute right-0 z-20 mt-3 w-72 rounded-3xl border border-slate-100 bg-white/95 p-4 text-sm text-slate-600 shadow-2xl shadow-slate-200/80">
+                    <div className="absolute left-0 z-50 mt-3 w-72 rounded-3xl border border-slate-100 bg-white/95 p-4 text-sm text-slate-600 shadow-2xl shadow-slate-200/80">
                       {activeShoppingList ? (
                         <>
                           <p className="text-base font-semibold text-slate-900">
@@ -1190,11 +1253,16 @@ export default function HomePage() {
                           <button
                             type="button"
                             onClick={() => {
+                              if (!currentUserId) {
+                                return;
+                              }
                               setIsListMenuOpen(false);
-                              openRosterDialog(
-                                `${activeShoppingList.ownerLabel}'s list`,
-                                shoppingListCollaborators
-                              );
+                              openRosterDialog({
+                                title: `${activeShoppingList.ownerLabel}'s list`,
+                                collaborators: shoppingListCollaborators,
+                                resourceType: "SHOPPING_LIST",
+                                resourceId: currentUserId,
+                              });
                             }}
                             disabled={isCollaborationsLoading}
                             className={`rounded-2xl border px-3 py-2 text-xs font-semibold uppercase tracking-[0.25em] transition ${
@@ -1232,6 +1300,90 @@ export default function HomePage() {
                   )}
                 </div>
               )}
+            </div>
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                className="inline-flex items-center justify-center rounded-xl border border-slate-200 bg-white/70 px-3 py-2 text-sm font-semibold text-slate-700 shadow-inner shadow-white/60 transition hover:border-slate-300 md:hidden"
+                onClick={() => setIsNavMenuOpen((current) => !current)}
+                aria-expanded={isNavMenuOpen}
+                aria-controls="nav-quick-actions"
+              >
+                {isNavMenuOpen ? "Close" : "Menu"}
+              </button>
+              <div className="hidden flex-nowrap items-center gap-2 md:flex">
+                {isAuthenticated && (
+                  <Link
+                    href="/shopping-list"
+                    className="inline-flex h-11 items-center justify-center rounded-xl bg-slate-900 px-5 text-sm font-semibold text-white shadow-lg shadow-slate-900/20 transition hover:-translate-y-0.5"
+                  >
+                    Shopping list ({shoppingListTotal})
+                  </Link>
+                )}
+                {isAdmin && (
+                  <Link
+                    href="/whitelist"
+                    className="inline-flex h-11 items-center justify-center rounded-xl border border-slate-300 bg-white/80 px-5 text-sm font-semibold text-slate-800 shadow-inner shadow-slate-100 transition hover:border-slate-400"
+                  >
+                    Admin whitelist
+                  </Link>
+                )}
+                <div className="group relative inline-flex h-11 items-center justify-center rounded-xl border border-emerald-300 bg-white/70 px-5 text-xs font-semibold uppercase tracking-[0.35em] text-emerald-600">
+                  {isAuthenticated ? "Synced" : "Local"}
+                  <div className="pointer-events-none absolute top-full mt-2 hidden w-64 rounded-2xl border border-emerald-100 bg-white/95 p-3 text-left text-xs font-medium normal-case tracking-normal text-slate-600 shadow-xl shadow-emerald-100/70 group-hover:block">
+                    {isAuthenticated
+                      ? "Recipes and lists back up automatically across your devices."
+                      : "We will sync this library across devices when you sign in."}
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  disabled={isSessionLoading}
+                  onClick={() => {
+                    if (isAuthenticated) {
+                      void signOut();
+                    } else {
+                      void signIn("google");
+                    }
+                  }}
+                  className="inline-flex h-11 items-center justify-center rounded-xl border border-slate-200 bg-white/70 px-5 text-sm font-semibold text-slate-700 shadow-inner shadow-white/60 transition hover:border-slate-300 disabled:cursor-not-allowed disabled:opacity-70"
+                >
+                  {isAuthenticated ? "Sign out" : "Sign in with Google"}
+                </button>
+              </div>
+            </div>
+          </nav>
+          {isNavMenuOpen && (
+            <div
+              id="nav-quick-actions"
+              className="mt-3 flex flex-col gap-3 rounded-2xl border border-slate-200 bg-white/95 p-4 text-sm text-slate-700 md:hidden"
+            >
+              {isAuthenticated && (
+                <Link
+                  href="/shopping-list"
+                  onClick={() => setIsNavMenuOpen(false)}
+                  className="inline-flex w-full items-center justify-center rounded-xl bg-slate-900 px-4 py-2 text-sm font-semibold text-white shadow-lg shadow-slate-900/20 transition hover:-translate-y-0.5"
+                >
+                  Shopping list ({shoppingListTotal})
+                </Link>
+              )}
+              {isAdmin && (
+                <Link
+                  href="/whitelist"
+                  onClick={() => setIsNavMenuOpen(false)}
+                  className="inline-flex w-full items-center justify-center rounded-xl border border-slate-300 bg-white/80 px-4 py-2 text-sm font-semibold text-slate-800 shadow-inner shadow-slate-100 transition hover:border-slate-400"
+                >
+                  Admin whitelist
+                </Link>
+              )}
+              <div className="rounded-xl border border-emerald-300 bg-white/70 px-3 py-2 text-center text-xs font-semibold uppercase tracking-[0.35em] text-emerald-600">
+                {isAuthenticated ? "Synced" : "Local"}
+              </div>
+              <p className="text-xs text-slate-500">
+                {isAuthenticated
+                  ? "Recipes and lists back up automatically across your devices."
+                  : "We will sync this library across devices when you sign in."}
+              </p>
               <button
                 type="button"
                 disabled={isSessionLoading}
@@ -1241,53 +1393,14 @@ export default function HomePage() {
                   } else {
                     void signIn("google");
                   }
+                  setIsNavMenuOpen(false);
                 }}
-                className="inline-flex items-center justify-center rounded-2xl border border-slate-200 bg-white/70 px-5 py-2 text-sm font-semibold text-slate-700 shadow-inner shadow-white/60 transition hover:border-slate-300 disabled:cursor-not-allowed disabled:opacity-70"
+                className="inline-flex w-full items-center justify-center rounded-xl border border-slate-200 bg-white/70 px-4 py-2 text-sm font-semibold text-slate-700 shadow-inner shadow-white/60 transition hover:border-slate-300 disabled:cursor-not-allowed disabled:opacity-70"
               >
                 {isAuthenticated ? "Sign out" : "Sign in with Google"}
               </button>
-              {isAdmin && (
-                <Link
-                  href="/whitelist"
-                  className="inline-flex items-center justify-center rounded-2xl border border-amber-300 bg-white/80 px-5 py-2 text-sm font-semibold text-amber-700 shadow-inner shadow-amber-100/80 transition hover:border-amber-400"
-                >
-                  Admin whitelist
-                </Link>
-              )}
-              <Link
-                href="/shopping-list"
-                className="inline-flex items-center justify-center rounded-2xl bg-slate-900 px-5 py-2 text-sm font-semibold text-white shadow-lg shadow-slate-900/20 transition hover:-translate-y-0.5"
-              >
-                Shopping list ({shoppingListTotal})
-              </Link>
             </div>
-          </nav>
-          <div className="mt-6 grid gap-6 lg:grid-cols-[1.2fr_0.8fr]">
-            <div className="space-y-3">
-              <h1 className="text-3xl font-semibold leading-snug text-slate-900 sm:text-4xl">
-                Build dinners, snacks, and a synced shopping list.
-              </h1>
-              <p className="text-base text-slate-600">
-                Tag every ingredient, keep favorites close, and dispatch pantry
-                plans straight to the cart.
-              </p>
-            </div>
-            <div className="rounded-2xl border border-white/70 bg-white/80 p-5 text-sm text-slate-600 shadow-inner shadow-white/60">
-              <p className="text-xs font-semibold uppercase tracking-[0.35em] text-amber-500">
-                {isAuthenticated ? "Synced" : "Offline mode"}
-              </p>
-              <p className="mt-2 text-slate-700">
-                {isAuthenticated
-                  ? "Recipes and lists back up automatically across your devices."
-                  : "Sign in with Google to sync this library everywhere."}
-              </p>
-              {!isAuthenticated && (
-                <p className="mt-2 text-xs text-slate-500">
-                  We keep your list in this browser until you sign in.
-                </p>
-              )}
-            </div>
-          </div>
+          )}
         </header>
 
         <section className="mt-2 grid gap-10 lg:grid-cols-[1.1fr_0.9fr]">
@@ -1662,10 +1775,12 @@ export default function HomePage() {
                                 className="flex w-full items-center justify-between rounded-xl px-3 py-2 text-left transition hover:bg-slate-50"
                                 onClick={() => {
                                   setActionsMenuRecipeId(null);
-                                  openRosterDialog(
-                                    `Collaborators on “${recipe.title}”`,
-                                    recipeCollaborators
-                                  );
+                                  openRosterDialog({
+                                    title: `Collaborators on “${recipe.title}”`,
+                                    collaborators: recipeCollaborators,
+                                    resourceType: "RECIPE",
+                                    resourceId: recipe.id,
+                                  });
                                 }}
                               >
                                 <span>View collaborators</span>
@@ -1802,7 +1917,11 @@ export default function HomePage() {
         open={Boolean(rosterModal)}
         title={rosterModal?.title ?? ""}
         collaborators={rosterModal?.collaborators ?? []}
-        onClose={() => setRosterModal(null)}
+        onClose={closeRosterModal}
+        onRemoveCollaborator={
+          rosterModal ? handleRemoveCollaborator : undefined
+        }
+        removingCollaboratorId={removingCollaboratorId}
       />
       {pendingDeletionRecipe && (
         <div className="fixed inset-0 z-40 flex items-center justify-center px-4 py-8">

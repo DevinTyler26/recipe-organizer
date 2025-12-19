@@ -193,3 +193,69 @@ export async function POST(request: Request) {
     },
   });
 }
+
+export async function DELETE(request: Request) {
+  const user = await getCurrentUser();
+  if (!user) {
+    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  }
+
+  let payload: unknown;
+  try {
+    payload = await request.json();
+  } catch {
+    return NextResponse.json({ error: "Invalid JSON" }, { status: 400 });
+  }
+
+  const { resourceType, resourceId, collaboratorId } = (payload ?? {}) as {
+    resourceType?: unknown;
+    resourceId?: unknown;
+    collaboratorId?: unknown;
+  };
+
+  if (resourceType !== "RECIPE" && resourceType !== "SHOPPING_LIST") {
+    return NextResponse.json(
+      { error: "resourceType must be RECIPE or SHOPPING_LIST" },
+      { status: 400 }
+    );
+  }
+  if (typeof resourceId !== "string" || !resourceId.trim()) {
+    return NextResponse.json(
+      { error: "resourceId is required" },
+      { status: 400 }
+    );
+  }
+  if (typeof collaboratorId !== "string" || !collaboratorId.trim()) {
+    return NextResponse.json(
+      { error: "collaboratorId is required" },
+      { status: 400 }
+    );
+  }
+
+  const normalizedResourceType =
+    resourceType === "RECIPE"
+      ? CollaborationResourceType.RECIPE
+      : CollaborationResourceType.SHOPPING_LIST;
+  const normalizedResourceId = resourceId.trim();
+  const normalizedCollaboratorId = collaboratorId.trim();
+
+  const collaboration = await prisma.collaboration.findFirst({
+    where: {
+      ownerId: user.id,
+      resourceType: normalizedResourceType,
+      resourceId: normalizedResourceId,
+      collaboratorId: normalizedCollaboratorId,
+    },
+  });
+
+  if (!collaboration) {
+    return NextResponse.json(
+      { error: "Collaboration not found" },
+      { status: 404 }
+    );
+  }
+
+  await prisma.collaboration.delete({ where: { id: collaboration.id } });
+
+  return NextResponse.json({ success: true });
+}
