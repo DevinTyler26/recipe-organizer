@@ -209,6 +209,22 @@ const normalizeRecipeList = (list?: StoredRecipe[] | null) =>
     ? list.map(normalizeRecipe).sort((a, b) => a.order - b.order)
     : [];
 
+const summarizeCollaborators = (collaborators: CollaboratorSummary[]) => {
+  if (!collaborators.length) {
+    return "";
+  }
+  const names = collaborators.map(
+    (entry) => entry.name?.trim() || entry.email?.trim() || "a collaborator"
+  );
+  if (names.length === 1) {
+    return names[0];
+  }
+  if (names.length === 2) {
+    return `${names[0]} and ${names[1]}`;
+  }
+  return `${names.length} collaborators`;
+};
+
 export default function HomePage() {
   const { addItems, totalItems, lists, selectedListId, selectList } =
     useShoppingList();
@@ -230,6 +246,9 @@ export default function HomePage() {
     null
   );
   const [guestLibraryLoaded, setGuestLibraryLoaded] = useState(false);
+  const [recipesLoaded, setRecipesLoaded] = useState(false);
+  const [shareWithCurrentCollaborators, setShareWithCurrentCollaborators] =
+    useState(true);
   const [toastQueue, setToastQueue] = useState<ToastMessage[]>([]);
   const [activeToast, setActiveToast] = useState<ToastMessage | null>(null);
   const [libraryFilter, setLibraryFilter] = useState<"all" | "favorites">(
@@ -267,6 +286,17 @@ export default function HomePage() {
     }
     return lists[0] ?? null;
   }, [lists, selectedListId]);
+  const activeSharedListOwnerId =
+    activeShoppingList && !activeShoppingList.isSelf
+      ? activeShoppingList.ownerId
+      : null;
+  const activeSharedListOwnerLabel =
+    activeSharedListOwnerId && activeShoppingList
+      ? activeShoppingList.ownerLabel
+      : null;
+  useEffect(() => {
+    setShareWithCurrentCollaborators(true);
+  }, [activeShoppingList?.ownerId]);
   const shoppingListDestinationLabel =
     activeShoppingList?.ownerLabel ??
     (isAuthenticated ? "your list" : "this device");
@@ -289,6 +319,19 @@ export default function HomePage() {
     }
     return collaborationRoster.shoppingList.collaborators;
   }, [collaborationRoster, currentUserId]);
+  const activeListCollaborators = useMemo(() => {
+    return activeShoppingList?.isSelf ? shoppingListCollaborators : [];
+  }, [activeShoppingList?.isSelf, shoppingListCollaborators]);
+  const activeListCollaboratorSummary = useMemo(() => {
+    return summarizeCollaborators(activeListCollaborators);
+  }, [activeListCollaborators]);
+  const collaboratorSummaryDisplay =
+    activeListCollaboratorSummary || "your collaborators";
+  const showShareCollaboratorToggle = Boolean(
+    isAuthenticated &&
+      activeShoppingList?.isSelf &&
+      activeListCollaborators.length > 0
+  );
 
   const refreshCollaborations = useCallback(async () => {
     if (!isAuthenticated) {
@@ -426,6 +469,7 @@ export default function HomePage() {
             setRecipes(normalizeRecipeList(parsed as StoredRecipe[]));
             setGuestLibraryLoaded(true);
             setIsSyncing(false);
+            setRecipesLoaded(true);
             return;
           }
         }
@@ -435,10 +479,12 @@ export default function HomePage() {
       setRecipes(starterRecipes);
       setIsSyncing(false);
       setGuestLibraryLoaded(true);
+      setRecipesLoaded(true);
       return;
     }
 
     setGuestLibraryLoaded(false);
+    setRecipesLoaded(false);
     let cancelled = false;
     const fetchRecipes = async () => {
       setIsSyncing(true);
@@ -455,11 +501,13 @@ export default function HomePage() {
           setRecipes(
             normalizeRecipeList(body?.recipes as StoredRecipe[] | undefined)
           );
+          setRecipesLoaded(true);
         }
       } catch (error) {
         if (!cancelled) {
           console.error("Failed to fetch recipes", error);
           showToast("Unable to load your saved recipes.", "error");
+          setRecipesLoaded(true);
         }
       } finally {
         if (!cancelled) {
@@ -549,14 +597,13 @@ export default function HomePage() {
       ingredients,
       tags,
     };
-    const shareTargetOwnerId =
-      activeShoppingList && !activeShoppingList.isSelf
-        ? activeShoppingList.ownerId
-        : null;
-    const shareRecipientLabel =
-      shareTargetOwnerId && activeShoppingList
-        ? activeShoppingList.ownerLabel
-        : null;
+    const shareTargetOwnerId = activeSharedListOwnerId;
+    const shareRecipientLabel = activeSharedListOwnerLabel;
+    const shouldShareCollaborators =
+      shareWithCurrentCollaborators && activeListCollaborators.length > 0;
+    const collaboratorIdsPayload = shouldShareCollaborators
+      ? activeListCollaborators.map((collaborator) => collaborator.id)
+      : undefined;
 
     setIsSaving(true);
     if (editingRecipeId) {
@@ -654,7 +701,11 @@ export default function HomePage() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(
           shareTargetOwnerId
-            ? { ...payload, shareWithOwnerId: shareTargetOwnerId }
+            ? {
+                ...payload,
+                shareWithOwnerId: shareTargetOwnerId,
+                collaboratorIds: collaboratorIdsPayload,
+              }
             : payload
         ),
       });
@@ -668,11 +719,18 @@ export default function HomePage() {
       const savedRecipe = normalizeRecipe(body.recipe as StoredRecipe);
       setRecipes((current) => [savedRecipe, ...current]);
       resetFormState();
-      showToast(
-        shareRecipientLabel
-          ? `${savedRecipe.title} is ready and now shared with ${shareRecipientLabel}.`
-          : `${savedRecipe.title} is ready. Send it to your list when needed.`
-      );
+      const collaboratorDescriptor = shouldShareCollaborators
+        ? summarizeCollaborators(activeListCollaborators)
+        : "";
+      const collaboratorSuffix = collaboratorDescriptor
+        ? ` plus ${collaboratorDescriptor}`
+        : "";
+      const toastMessage = shareRecipientLabel
+        ? `${savedRecipe.title} is ready and now shared with ${shareRecipientLabel}${collaboratorSuffix}.`
+        : collaboratorDescriptor
+        ? `${savedRecipe.title} is ready and now shared with ${collaboratorDescriptor}.`
+        : `${savedRecipe.title} is ready. Send it to your list when needed.`;
+      showToast(toastMessage);
     } catch (error) {
       console.error("Failed to save recipe", error);
       showToast("Unable to save recipe right now. Please retry.", "error");
@@ -916,10 +974,12 @@ export default function HomePage() {
           ...baseLibrary.filter((recipe) => recipe.isFavorite),
           ...baseLibrary.filter((recipe) => !recipe.isFavorite),
         ];
-  const librarySummary =
-    libraryFilter === "favorites"
-      ? `${favoriteCount} favorite${favoriteCount === 1 ? "" : "s"}`
-      : `${orderedRecipes.length} saved`;
+  const showRecipeSkeletons = isAuthenticated && !recipesLoaded;
+  const librarySummary = showRecipeSkeletons
+    ? "Loading recipes…"
+    : libraryFilter === "favorites"
+    ? `${favoriteCount} favorite${favoriteCount === 1 ? "" : "s"}`
+    : `${orderedRecipes.length} saved`;
   const shoppingListTotal = hasHydrated ? totalItems : 0;
   const canDragReorder =
     effectiveSortMode === "default" && displayedRecipes.length > 1;
@@ -1304,6 +1364,26 @@ export default function HomePage() {
                   }
                 />
               </label>
+              {showShareCollaboratorToggle && (
+                <label className="flex items-start gap-3 rounded-2xl border border-slate-200 bg-white/70 px-4 py-3 text-sm text-slate-700 shadow-inner shadow-white/70">
+                  <input
+                    type="checkbox"
+                    className="mt-1 h-5 w-5 rounded border-slate-300 text-rose-500 focus:ring-rose-400"
+                    checked={shareWithCurrentCollaborators}
+                    onChange={(event) =>
+                      setShareWithCurrentCollaborators(event.target.checked)
+                    }
+                  />
+                  <span>
+                    <span className="font-semibold text-slate-900">
+                      Share with {collaboratorSummaryDisplay}
+                    </span>
+                    <p className="mt-1 text-xs text-slate-500">
+                      We'll add them as recipe collaborators automatically.
+                    </p>
+                  </span>
+                </label>
+              )}
             </div>
             <div className="mt-6 flex flex-wrap items-center gap-4">
               <button
@@ -1422,7 +1502,33 @@ export default function HomePage() {
               }}
               onDrop={handleRecipeListDrop}
             >
-              {displayedRecipes.length === 0 ? (
+              {showRecipeSkeletons ? (
+                Array.from({ length: 3 }).map((_, index) => (
+                  <div
+                    key={`recipe-skeleton-${index}`}
+                    className="rounded-2xl border border-slate-100 bg-white/80 p-5 shadow-sm animate-pulse"
+                  >
+                    <div className="flex items-start justify-between gap-4">
+                      <div className="flex-1 space-y-3">
+                        <div className="h-5 w-2/5 rounded-full bg-slate-200" />
+                        <div className="h-3 w-3/4 rounded-full bg-slate-100" />
+                        <div className="flex flex-wrap gap-2">
+                          <span className="h-6 w-16 rounded-full bg-slate-100" />
+                          <span className="h-6 w-20 rounded-full bg-slate-100" />
+                          <span className="h-6 w-14 rounded-full bg-slate-100" />
+                        </div>
+                      </div>
+                      <div className="h-8 w-8 rounded-full border border-slate-200 bg-white" />
+                    </div>
+                    <div className="mt-4 flex flex-wrap gap-2">
+                      <span className="h-6 w-24 rounded-full bg-slate-100" />
+                      <span className="h-6 w-32 rounded-full bg-slate-100" />
+                      <span className="h-6 w-28 rounded-full bg-slate-100" />
+                    </div>
+                    <div className="mt-4 h-10 w-full rounded-xl bg-slate-200" />
+                  </div>
+                ))
+              ) : displayedRecipes.length === 0 ? (
                 <div className="rounded-2xl border border-dashed border-slate-200 bg-white/70 px-4 py-5 text-sm text-slate-500">
                   {libraryFilter === "favorites"
                     ? "Mark recipes as favorites to spotlight them here."
