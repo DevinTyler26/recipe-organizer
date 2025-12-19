@@ -33,14 +33,29 @@ export async function GET() {
     ],
     include: {
       owner: { select: ownerSelect },
+      updatedBy: { select: ownerSelect },
       favorites: { select: { userId: true } },
     },
   });
 
+  const recipeIds = recipes.map((recipe) => recipe.id);
+  const orderPreferences = recipeIds.length
+    ? await prisma.recipeOrderPreference.findMany({
+        where: { userId: user.id, recipeId: { in: recipeIds } },
+        select: { recipeId: true, sortOrder: true },
+      })
+    : [];
+  const orderLookup = new Map<string, number>(
+    orderPreferences.map((preference) => [preference.recipeId, preference.sortOrder])
+  );
+
   const hydrated = recipes.map((recipe) => {
     const { favorites, ...rest } = recipe;
+    const resolvedOrder =
+      orderLookup.get(recipe.id) ?? rest.sortOrder ?? 0;
     return {
       ...rest,
+      order: resolvedOrder,
       isFavorite: favorites.some((favorite) => favorite.userId === user.id),
     };
   });

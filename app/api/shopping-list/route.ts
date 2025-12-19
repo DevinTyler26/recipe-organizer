@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import {
+  collectSourceTitles,
   IncomingIngredient,
   QuantityEntry,
   ShoppingListState,
@@ -273,6 +274,11 @@ export async function PUT(request: Request) {
     orderBy: [{ sortOrder: "asc" }, { createdAt: "asc" }],
   });
 
+  const preservedSources = collectSourceTitles(existingEntries);
+  const manualSourceTitle = preservedSources.length
+    ? preservedSources.join(" · ")
+    : "Manual adjustment";
+
   if (!existingEntries.length) {
     return NextResponse.json({ error: "Item not found" }, { status: 404 });
   }
@@ -307,7 +313,7 @@ export async function PUT(request: Request) {
             quantityText && parsed.quantityText ? parsed.amountValue : null,
           measureText: parsed.measureText || null,
           sourceRecipeId: null,
-          sourceRecipeTitle: "Manual adjustment",
+          sourceRecipeTitle: manualSourceTitle,
           sortOrder,
         },
       }),

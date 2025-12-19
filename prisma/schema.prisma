@@ -25,6 +25,7 @@ model User {
   collaborationInvitationsSent  Collaboration[]      @relation("CollaborationOwner")
   collaborationsAccepted        Collaboration[]      @relation("CollaborationCollaborator")
   recipeFavorites               RecipeFavorite[]
+  recipeOrderPreferences        RecipeOrderPreference[]
   createdAt                     DateTime             @default(now())
   updatedAt                     DateTime             @updatedAt
 }
@@ -88,6 +89,7 @@ model Recipe {
   createdBy User @relation("RecipeCreatedBy", fields: [createdById], references: [id], onDelete: Cascade)
   updatedBy User @relation("RecipeUpdatedBy", fields: [updatedById], references: [id], onDelete: Cascade)
   favorites RecipeFavorite[]
+  orderPreferences RecipeOrderPreference[]
 
   @@index([ownerId, sortOrder])
   @@index([ownerId, createdAt])
@@ -104,6 +106,22 @@ model RecipeFavorite {
 
   @@unique([recipeId, userId])
   @@index([userId])
+}
+
+model RecipeOrderPreference {
+  id        String   @id @default(cuid())
+  userId    String
+  recipeId  String
+  sortOrder Int
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  recipe Recipe @relation(fields: [recipeId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, recipeId])
+  @@index([recipeId])
+  @@index([userId, sortOrder])
 }
 
 model ShoppingListEntry {
