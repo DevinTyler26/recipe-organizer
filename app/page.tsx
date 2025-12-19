@@ -224,6 +224,8 @@ export default function HomePage() {
   );
   const [deletingRecipeId, setDeletingRecipeId] = useState<string | null>(null);
   const [editingRecipeId, setEditingRecipeId] = useState<string | null>(null);
+  const [pendingDeletionRecipe, setPendingDeletionRecipe] =
+    useState<Recipe | null>(null);
   const [actionsMenuRecipeId, setActionsMenuRecipeId] = useState<string | null>(
     null
   );
@@ -547,6 +549,14 @@ export default function HomePage() {
       ingredients,
       tags,
     };
+    const shareTargetOwnerId =
+      activeShoppingList && !activeShoppingList.isSelf
+        ? activeShoppingList.ownerId
+        : null;
+    const shareRecipientLabel =
+      shareTargetOwnerId && activeShoppingList
+        ? activeShoppingList.ownerLabel
+        : null;
 
     setIsSaving(true);
     if (editingRecipeId) {
@@ -642,7 +652,11 @@ export default function HomePage() {
       const response = await fetch("/api/recipes", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payload),
+        body: JSON.stringify(
+          shareTargetOwnerId
+            ? { ...payload, shareWithOwnerId: shareTargetOwnerId }
+            : payload
+        ),
       });
       const body = (await response.json().catch(() => null)) as {
         recipe?: Recipe;
@@ -655,7 +669,9 @@ export default function HomePage() {
       setRecipes((current) => [savedRecipe, ...current]);
       resetFormState();
       showToast(
-        `${savedRecipe.title} is ready. Send it to your list when needed.`
+        shareRecipientLabel
+          ? `${savedRecipe.title} is ready and now shared with ${shareRecipientLabel}.`
+          : `${savedRecipe.title} is ready. Send it to your list when needed.`
       );
     } catch (error) {
       console.error("Failed to save recipe", error);
@@ -723,16 +739,18 @@ export default function HomePage() {
       if (!response.ok || !body?.recipe) {
         throw new Error(body?.error ?? "Failed to update favorite state");
       }
-      const updatedRecipe = normalizeRecipe(body.recipe as StoredRecipe);
+      const updatedServerRecipe = normalizeRecipe(body.recipe as StoredRecipe);
       setRecipes((current) =>
         current.map((existing) =>
-          existing.id === recipe.id ? updatedRecipe : existing
+          existing.id === recipe.id
+            ? { ...existing, isFavorite: updatedServerRecipe.isFavorite }
+            : existing
         )
       );
       showToast(
-        updatedRecipe.isFavorite
-          ? `${updatedRecipe.title} marked as a favorite.`
-          : `${updatedRecipe.title} removed from favorites.`
+        updatedServerRecipe.isFavorite
+          ? `${recipe.title} marked as a favorite.`
+          : `${recipe.title} removed from favorites.`
       );
     } catch (error) {
       console.error("Failed to toggle favorite", error);
@@ -759,16 +777,12 @@ export default function HomePage() {
     });
   }, []);
 
-  const handleDeleteRecipe = useCallback(
+  const requestDeleteRecipe = useCallback((recipe: Recipe) => {
+    setPendingDeletionRecipe(recipe);
+  }, []);
+
+  const deleteRecipe = useCallback(
     async (recipe: Recipe) => {
-      const confirmed = window.confirm(
-        `Delete ${recipe.title}? This action cannot be undone.`
-      );
-
-      if (!confirmed) {
-        return;
-      }
-
       const wasEditingTarget = editingRecipeId === recipe.id;
       if (wasEditingTarget) {
         resetFormState();
@@ -821,6 +835,19 @@ export default function HomePage() {
     [editingRecipeId, isAuthenticated, recipes, resetFormState, showToast]
   );
 
+  const confirmDeleteRecipe = useCallback(() => {
+    if (!pendingDeletionRecipe) {
+      return;
+    }
+    const recipe = pendingDeletionRecipe;
+    setPendingDeletionRecipe(null);
+    void deleteRecipe(recipe);
+  }, [deleteRecipe, pendingDeletionRecipe]);
+
+  const cancelDeleteRecipe = useCallback(() => {
+    setPendingDeletionRecipe(null);
+  }, []);
+
   useEffect(() => {
     if (!actionsMenuRecipeId) {
       return;
@@ -863,7 +890,7 @@ export default function HomePage() {
       if (event.key === "Backspace" || event.key === "Delete") {
         event.preventDefault();
         setActionsMenuRecipeId(null);
-        void handleDeleteRecipe(activeRecipe);
+        requestDeleteRecipe(activeRecipe);
       }
     };
 
@@ -873,7 +900,7 @@ export default function HomePage() {
       document.removeEventListener("click", handleClick);
       document.removeEventListener("keydown", handleKeydown);
     };
-  }, [actionsMenuRecipeId, handleDeleteRecipe, handleEditRecipe, recipes]);
+  }, [actionsMenuRecipeId, handleEditRecipe, recipes, requestDeleteRecipe]);
 
   const favoritesOnly = orderedRecipes.filter((recipe) => recipe.isFavorite);
   const favoriteCount = favoritesOnly.length;
@@ -1412,6 +1439,7 @@ export default function HomePage() {
                   const canShareRecipe = isAuthenticated && isRecipeOwner;
                   const recipeCollaborators =
                     recipeCollaboratorLookup.get(recipe.id) ?? [];
+                  const isActionsMenuOpen = actionsMenuRecipeId === recipe.id;
                   return (
                     <article
                       key={recipe.id}
@@ -1433,16 +1461,16 @@ export default function HomePage() {
                         draggingRecipeId === recipe.id
                           ? "opacity-70 ring-2 ring-rose-200"
                           : ""
-                      }`}
+                      } ${isActionsMenuOpen ? "z-40" : "z-0"}`}
                     >
                       <div
-                        className="absolute right-4 top-4 sm:right-5 sm:top-5"
+                        className="absolute right-4 top-4 z-20 sm:right-5 sm:top-5"
                         data-recipe-actions="true"
                       >
                         <button
                           type="button"
                           aria-haspopup="menu"
-                          aria-expanded={actionsMenuRecipeId === recipe.id}
+                          aria-expanded={isActionsMenuOpen}
                           title="Recipe actions"
                           disabled={deletingRecipeId === recipe.id}
                           onClick={() =>
@@ -1462,8 +1490,8 @@ export default function HomePage() {
                             <span className="h-1 w-1 rounded-full bg-current" />
                           </span>
                         </button>
-                        {actionsMenuRecipeId === recipe.id && (
-                          <div className="absolute right-0 z-10 mt-3 w-48 rounded-2xl border border-slate-100 bg-white/95 p-1 text-sm font-medium text-slate-600 shadow-lg shadow-slate-200/80">
+                        {isActionsMenuOpen && (
+                          <div className="absolute right-0 z-30 mt-3 w-48 rounded-2xl border border-slate-100 bg-white/95 p-1 text-sm font-medium text-slate-600 shadow-lg shadow-slate-200/80">
                             <button
                               type="button"
                               className={`flex w-full items-center justify-between rounded-xl px-3 py-2 text-left transition ${
@@ -1558,7 +1586,7 @@ export default function HomePage() {
                               disabled={deletingRecipeId === recipe.id}
                               onClick={() => {
                                 setActionsMenuRecipeId(null);
-                                void handleDeleteRecipe(recipe);
+                                requestDeleteRecipe(recipe);
                               }}
                             >
                               <span>Delete</span>
@@ -1661,6 +1689,62 @@ export default function HomePage() {
         collaborators={rosterModal?.collaborators ?? []}
         onClose={() => setRosterModal(null)}
       />
+      {pendingDeletionRecipe && (
+        <div className="fixed inset-0 z-40 flex items-center justify-center px-4 py-8">
+          <div
+            className="absolute inset-0 bg-slate-900/40 backdrop-blur-sm"
+            aria-hidden="true"
+            onClick={cancelDeleteRecipe}
+          />
+          <div
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="delete-recipe-title"
+            className="relative z-50 w-full max-w-md rounded-3xl border border-slate-100 bg-white p-6 shadow-2xl shadow-slate-900/10"
+          >
+            <div className="flex flex-col gap-3">
+              <div className="flex items-center gap-3">
+                <div className="flex h-12 w-12 items-center justify-center rounded-2xl bg-rose-50 text-rose-500">
+                  <span aria-hidden="true" className="text-xl">
+                    ✕
+                  </span>
+                </div>
+                <div>
+                  <h2
+                    id="delete-recipe-title"
+                    className="text-lg font-semibold text-slate-900"
+                  >
+                    Delete “{pendingDeletionRecipe.title}”?
+                  </h2>
+                  <p className="mt-1 text-sm text-slate-500">
+                    This removes it from your library and any collaborators will
+                    lose access.
+                  </p>
+                </div>
+              </div>
+              <div className="mt-4 flex flex-col gap-3 sm:flex-row sm:justify-end">
+                <button
+                  type="button"
+                  onClick={cancelDeleteRecipe}
+                  className="rounded-xl border border-slate-200 px-4 py-2 text-sm font-semibold text-slate-700 transition hover:bg-slate-50"
+                >
+                  Keep recipe
+                </button>
+                <button
+                  type="button"
+                  onClick={confirmDeleteRecipe}
+                  disabled={deletingRecipeId === pendingDeletionRecipe.id}
+                  className="rounded-xl bg-rose-600 px-4 py-2 text-sm font-semibold text-white shadow-lg shadow-rose-200 transition hover:bg-rose-700 disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  {deletingRecipeId === pendingDeletionRecipe.id
+                    ? "Deleting…"
+                    : "Delete recipe"}
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
       {activeToast && (
         <div
           role="status"

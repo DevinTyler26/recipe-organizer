@@ -23,6 +23,7 @@ import {
 } from "@/lib/shopping-list";
 
 const STORAGE_KEY = "recipe-organizer-shopping-list";
+const SELECTED_OWNER_STORAGE_KEY = "recipe-organizer-active-shopping-list";
 
 type ShoppingListContextValue = {
   items: ShoppingListItem[];
@@ -102,7 +103,12 @@ export function ShoppingListProvider({ children }: { children: ReactNode }) {
   const [remoteLists, setRemoteLists] = useState<OwnerListState[]>([]);
   const [isRemote, setIsRemote] = useState(false);
   const [isSyncing, setIsSyncing] = useState(false);
-  const [selectedOwnerId, setSelectedOwnerId] = useState<string | null>(null);
+  const [selectedOwnerId, setSelectedOwnerId] = useState<string | null>(() => {
+    if (typeof window === "undefined") {
+      return null;
+    }
+    return window.localStorage.getItem(SELECTED_OWNER_STORAGE_KEY);
+  });
 
   const fetchRemoteLists = useCallback(async () => {
     const response = await fetch("/api/shopping-list", { cache: "no-store" });
@@ -477,6 +483,15 @@ export function ShoppingListProvider({ children }: { children: ReactNode }) {
       return resolvedLists[0].ownerId;
     });
   }, [resolvedLists]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    if (selectedOwnerId) {
+      window.localStorage.setItem(SELECTED_OWNER_STORAGE_KEY, selectedOwnerId);
+    } else {
+      window.localStorage.removeItem(SELECTED_OWNER_STORAGE_KEY);
+    }
+  }, [selectedOwnerId]);
 
   const activeList = useMemo(() => {
     if (!resolvedLists.length) return null;

@@ -1,8 +1,9 @@
 import { NextResponse } from "next/server";
-import { Prisma } from "@prisma/client";
+import { CollaborationResourceType, Prisma } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
 import { getCurrentUser } from "@/lib/auth";
 import {
+  canAccessShoppingListOwner,
   getRecipeAccessibleToUser,
   getSharedRecipeIds,
 } from "@/lib/collaboration";
@@ -30,10 +31,21 @@ export async function GET() {
       { sortOrder: "asc" },
       { createdAt: "asc" },
     ],
-    include: { owner: { select: ownerSelect } },
+    include: {
+      owner: { select: ownerSelect },
+      favorites: { select: { userId: true } },
+    },
   });
 
-  return NextResponse.json({ recipes });
+  const hydrated = recipes.map((recipe) => {
+    const { favorites, ...rest } = recipe;
+    return {
+      ...rest,
+      isFavorite: favorites.some((favorite) => favorite.userId === user.id),
+    };
+  });
+
+  return NextResponse.json({ recipes: hydrated });
 }
 
 export async function POST(request: Request) {
@@ -49,12 +61,14 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: "Invalid JSON" }, { status: 400 });
   }
 
-  const { title, summary, ingredients, tags } = (payload ?? {}) as {
+  const { title, summary, ingredients, tags, shareWithOwnerId } =
+    (payload ?? {}) as {
     title?: unknown;
     summary?: unknown;
     ingredients?: unknown;
     tags?: unknown;
-  };
+      shareWithOwnerId?: unknown;
+    };
 
   if (typeof title !== "string" || !title.trim()) {
     return NextResponse.json({ error: "Title is required" }, { status: 400 });
@@ -78,6 +92,45 @@ export async function POST(request: Request) {
     normalizedTags = Array.from(
       new Set(tags.map((tag) => (typeof tag === "string" ? tag.trim() : "")).filter(Boolean))
     );
+  }
+
+  let shareTargetUser:
+    | {
+        id: string;
+        email: string | null;
+      }
+    | null = null;
+  if (shareWithOwnerId !== undefined) {
+    if (typeof shareWithOwnerId !== "string" || !shareWithOwnerId.trim()) {
+      return NextResponse.json(
+        { error: "shareWithOwnerId must be a non-empty string" },
+        { status: 400 }
+      );
+    }
+    const trimmedShareTarget = shareWithOwnerId.trim();
+    if (trimmedShareTarget !== user.id) {
+      const canShare = await canAccessShoppingListOwner(
+        user.id,
+        trimmedShareTarget
+      );
+      if (!canShare) {
+        return NextResponse.json(
+          { error: "You do not have access to share with that user" },
+          { status: 403 }
+        );
+      }
+      const targetUser = await prisma.user.findUnique({
+        where: { id: trimmedShareTarget },
+        select: { id: true, email: true },
+      });
+      if (!targetUser) {
+        return NextResponse.json(
+          { error: "Unable to find that collaborator" },
+          { status: 404 }
+        );
+      }
+      shareTargetUser = targetUser;
+    }
   }
 
   try {
@@ -106,6 +159,30 @@ export async function POST(request: Request) {
       },
       include: { owner: { select: ownerSelect } },
     });
+
+    if (shareTargetUser) {
+      try {
+        await prisma.collaboration.create({
+          data: {
+            resourceType: CollaborationResourceType.RECIPE,
+            resourceId: recipe.id,
+            ownerId: user.id,
+            collaboratorId: shareTargetUser.id,
+            invitedEmail: shareTargetUser.email?.toLowerCase() ?? "",
+            acceptedAt: new Date(),
+          },
+        });
+      } catch (shareError) {
+        if (
+          !(
+            shareError instanceof Prisma.PrismaClientKnownRequestError &&
+            shareError.code === "P2002"
+          )
+        ) {
+          console.error("Failed to auto-share recipe", shareError);
+        }
+      }
+    }
     return NextResponse.json({ recipe }, { status: 201 });
   } catch (error) {
     console.error("Failed to create recipe", error);
@@ -221,13 +298,44 @@ export async function PATCH(request: Request) {
     return NextResponse.json({ error: "Recipe not found" }, { status: 404 });
   }
 
-  const updatedRecipe = await prisma.recipe.update({
+  if (recipe.ownerId === user.id) {
+    await prisma.recipe.update({
+      where: { id: recipe.id },
+      data: { updatedById: user.id },
+    });
+  }
+
+  if (isFavorite) {
+    await prisma.recipeFavorite.upsert({
+      where: { recipeId_userId: { recipeId: recipe.id, userId: user.id } },
+      update: {},
+      create: { recipeId: recipe.id, userId: user.id },
+    });
+  } else {
+    await prisma.recipeFavorite.deleteMany({
+      where: { recipeId: recipe.id, userId: user.id },
+    });
+  }
+
+  const updatedRecipe = await prisma.recipe.findUnique({
     where: { id: recipe.id },
-    data: { isFavorite, updatedById: user.id },
     include: { owner: { select: ownerSelect } },
   });
 
-  return NextResponse.json({ recipe: updatedRecipe });
+  if (!updatedRecipe) {
+    return NextResponse.json({ error: "Recipe not found" }, { status: 404 });
+  }
+
+  const isFavoriteForUser = await prisma.recipeFavorite.findFirst({
+    where: { recipeId: recipe.id, userId: user.id },
+  });
+
+  return NextResponse.json({
+    recipe: {
+      ...updatedRecipe,
+      isFavorite: Boolean(isFavoriteForUser),
+    },
+  });
 }
 
 export async function DELETE(request: Request) {
