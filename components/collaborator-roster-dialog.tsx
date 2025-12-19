@@ -8,6 +8,8 @@ type CollaboratorRosterDialogProps = {
   title: string;
   collaborators: CollaboratorSummary[];
   onClose: () => void;
+  onRemoveCollaborator?: (collaboratorId: string) => void;
+  removingCollaboratorId?: string | null;
 };
 
 export function CollaboratorRosterDialog({
@@ -15,10 +17,14 @@ export function CollaboratorRosterDialog({
   title,
   collaborators,
   onClose,
+  onRemoveCollaborator,
+  removingCollaboratorId,
 }: CollaboratorRosterDialogProps) {
   if (!open) {
     return null;
   }
+
+  const canRemove = typeof onRemoveCollaborator === "function";
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/40 px-4 py-6">
@@ -68,10 +74,28 @@ export function CollaboratorRosterDialog({
                       {collaborator.email}
                     </p>
                   )}
+                  {canRemove && (
+                    <span className="mt-2 inline-flex rounded-full bg-rose-50 px-3 py-1 text-[10px] font-semibold uppercase tracking-[0.3em] text-rose-500">
+                      Editor
+                    </span>
+                  )}
                 </div>
-                <span className="rounded-full bg-rose-50 px-3 py-1 text-[10px] font-semibold uppercase tracking-[0.3em] text-rose-500">
-                  Editor
-                </span>
+                {canRemove ? (
+                  <button
+                    type="button"
+                    onClick={() => onRemoveCollaborator?.(collaborator.id)}
+                    disabled={removingCollaboratorId === collaborator.id}
+                    className="rounded-full border border-rose-200 px-3 py-1 text-[10px] font-semibold uppercase tracking-[0.3em] text-rose-500 transition hover:bg-rose-50 disabled:cursor-not-allowed disabled:opacity-60"
+                  >
+                    {removingCollaboratorId === collaborator.id
+                      ? "Removing…"
+                      : "Remove"}
+                  </button>
+                ) : (
+                  <span className="rounded-full bg-rose-50 px-3 py-1 text-[10px] font-semibold uppercase tracking-[0.3em] text-rose-500">
+                    Editor
+                  </span>
+                )}
               </li>
             ))}
           </ul>
