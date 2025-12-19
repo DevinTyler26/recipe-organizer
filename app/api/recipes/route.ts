@@ -61,14 +61,21 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: "Invalid JSON" }, { status: 400 });
   }
 
-  const { title, summary, ingredients, tags, shareWithOwnerId } =
-    (payload ?? {}) as {
+  const {
+    title,
+    summary,
+    ingredients,
+    tags,
+    shareWithOwnerId,
+    collaboratorIds,
+  } = (payload ?? {}) as {
     title?: unknown;
     summary?: unknown;
     ingredients?: unknown;
     tags?: unknown;
-      shareWithOwnerId?: unknown;
-    };
+    shareWithOwnerId?: unknown;
+    collaboratorIds?: unknown;
+  };
 
   if (typeof title !== "string" || !title.trim()) {
     return NextResponse.json({ error: "Title is required" }, { status: 400 });
@@ -133,6 +140,32 @@ export async function POST(request: Request) {
     }
   }
 
+  let collaboratorTargets: {
+    id: string;
+    email: string | null;
+  }[] = [];
+  if (collaboratorIds !== undefined) {
+    if (!Array.isArray(collaboratorIds)) {
+      return NextResponse.json(
+        { error: "collaboratorIds must be an array of strings" },
+        { status: 400 }
+      );
+    }
+    const normalized = collaboratorIds
+      .filter((value): value is string => typeof value === "string")
+      .map((value) => value.trim())
+      .filter(Boolean);
+    if (normalized.length) {
+      const collaborators = await prisma.user.findMany({
+        where: { id: { in: normalized } },
+        select: { id: true, email: true },
+      });
+      collaboratorTargets = collaborators.filter(
+        (entry) => entry.id !== user.id
+      );
+    }
+  }
+
   try {
     const lowestOrder = await prisma.recipe.aggregate({
       where: { ownerId: user.id },
@@ -160,28 +193,37 @@ export async function POST(request: Request) {
       include: { owner: { select: ownerSelect } },
     });
 
-    if (shareTargetUser) {
-      try {
-        await prisma.collaboration.create({
-          data: {
-            resourceType: CollaborationResourceType.RECIPE,
-            resourceId: recipe.id,
-            ownerId: user.id,
-            collaboratorId: shareTargetUser.id,
-            invitedEmail: shareTargetUser.email?.toLowerCase() ?? "",
-            acceptedAt: new Date(),
-          },
-        });
-      } catch (shareError) {
-        if (
-          !(
-            shareError instanceof Prisma.PrismaClientKnownRequestError &&
-            shareError.code === "P2002"
-          )
-        ) {
-          console.error("Failed to auto-share recipe", shareError);
-        }
-      }
+    const collaboratorList = shareTargetUser
+      ? [shareTargetUser, ...collaboratorTargets]
+      : collaboratorTargets;
+    if (collaboratorList.length) {
+      await Promise.all(
+        collaboratorList.map((target) =>
+          prisma.collaboration.upsert({
+            where: {
+              resourceType_resourceId_collaboratorId: {
+                resourceType: CollaborationResourceType.RECIPE,
+                resourceId: recipe.id,
+                collaboratorId: target.id,
+              },
+            },
+            update: {
+              acceptedAt: new Date(),
+              invitedEmail: target.email?.toLowerCase() ?? "",
+            },
+            create: {
+              resourceType: CollaborationResourceType.RECIPE,
+              resourceId: recipe.id,
+              ownerId: user.id,
+              collaboratorId: target.id,
+              invitedEmail: target.email?.toLowerCase() ?? "",
+              acceptedAt: new Date(),
+            },
+          })
+        )
+      ).catch((shareError) => {
+        console.error("Failed to auto-share recipe", shareError);
+      });
     }
     return NextResponse.json({ recipe }, { status: 201 });
   } catch (error) {
