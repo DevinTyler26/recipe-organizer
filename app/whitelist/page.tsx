@@ -1,6 +1,7 @@
 import Link from "next/link";
 import { redirect } from "next/navigation";
 import { getServerSession } from "next-auth";
+import { AppNav } from "@/components/app-nav";
 import { authOptions } from "@/lib/auth";
 import { WhitelistManager } from "@/components/whitelist-manager";
 
@@ -12,7 +13,8 @@ export default async function WhitelistPage() {
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-slate-50 via-amber-50 to-white px-4 py-10 text-slate-900">
-      <main className="mx-auto flex w-full max-w-4xl flex-col gap-8">
+      <main className="mx-auto flex w-full max-w-5xl flex-col gap-8">
+        <AppNav />
         <header className="rounded-3xl border border-white/60 bg-white/85 p-8 shadow-xl shadow-slate-200/70 backdrop-blur">
           <p className="text-xs font-semibold uppercase tracking-[0.35em] text-amber-500">
             Admin controls
