@@ -272,6 +272,7 @@ export default function HomePage() {
   const listMenuRef = useRef<HTMLDivElement | null>(null);
   const currentUserId = session?.user?.id ?? null;
   const accountLabel = session?.user?.name || session?.user?.email || "Account";
+  const isAdmin = Boolean(session?.user?.isAdmin);
   const orderedRecipes = useMemo(
     () => [...recipes].sort((a, b) => a.order - b.order),
     [recipes]
@@ -1245,6 +1246,14 @@ export default function HomePage() {
               >
                 {isAuthenticated ? "Sign out" : "Sign in with Google"}
               </button>
+              {isAdmin && (
+                <Link
+                  href="/whitelist"
+                  className="inline-flex items-center justify-center rounded-2xl border border-amber-300 bg-white/80 px-5 py-2 text-sm font-semibold text-amber-700 shadow-inner shadow-amber-100/80 transition hover:border-amber-400"
+                >
+                  Admin whitelist
+                </Link>
+              )}
               <Link
                 href="/shopping-list"
                 className="inline-flex items-center justify-center rounded-2xl bg-slate-900 px-5 py-2 text-sm font-semibold text-white shadow-lg shadow-slate-900/20 transition hover:-translate-y-0.5"
