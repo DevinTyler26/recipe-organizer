@@ -61,10 +61,14 @@ export async function GET() {
       record.entries.push(quantityEntry);
       record.order = Math.min(record.order, entry.sortOrder ?? 0);
       if (crossedOffAt !== null) {
+        const existingCrossedAt =
+          typeof record.crossedOffAt === "number"
+            ? record.crossedOffAt
+            : null;
         record.crossedOffAt =
-          record.crossedOffAt === null
+          existingCrossedAt === null
             ? crossedOffAt
-            : Math.min(record.crossedOffAt, crossedOffAt);
+            : Math.min(existingCrossedAt, crossedOffAt);
       }
     } else {
       ownerState[key] = {
