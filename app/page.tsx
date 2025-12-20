@@ -356,6 +356,7 @@ export default function HomePage() {
   const offlineRecipeQueueHydratedRef = useRef(false);
   const offlineRecipeQueueFlushInFlightRef = useRef(false);
   const liveUpdatesSourceRef = useRef<EventSource | null>(null);
+  const pendingReorderRef = useRef<string[] | null>(null);
   const updateOfflineRecipeQueue = useCallback(
     (mutations: OfflineRecipeMutation[]) => {
       offlineRecipeMutationsRef.current = mutations;
@@ -520,8 +521,40 @@ export default function HomePage() {
         const normalized = normalizeRecipeList(
           body?.recipes as StoredRecipe[] | undefined
         );
-        setRecipes(normalized);
-        persistRemoteRecipeCache(normalized);
+        const pendingOrder = pendingReorderRef.current;
+        const remoteIds = normalized.map((recipe) => recipe.id);
+        let resolvedRecipes = normalized;
+        if (pendingOrder && pendingOrder.length) {
+          const ordersMatch =
+            pendingOrder.length === remoteIds.length &&
+            pendingOrder.every((id, index) => id === remoteIds[index]);
+          if (ordersMatch) {
+            pendingReorderRef.current = null;
+          } else {
+            const indexMap = new Map<string, number>();
+            pendingOrder.forEach((id, index) => indexMap.set(id, index));
+            const resorted = [...normalized].sort((a, b) => {
+              const aIndex = indexMap.get(a.id);
+              const bIndex = indexMap.get(b.id);
+              if (aIndex !== undefined && bIndex !== undefined) {
+                return aIndex - bIndex;
+              }
+              if (aIndex !== undefined) {
+                return -1;
+              }
+              if (bIndex !== undefined) {
+                return 1;
+              }
+              return a.order - b.order;
+            });
+            resolvedRecipes = resorted.map((recipe, index) => ({
+              ...recipe,
+              order: index,
+            }));
+          }
+        }
+        setRecipes(resolvedRecipes);
+        persistRemoteRecipeCache(resolvedRecipes);
         noteCollaboratorRecipeUpdates(normalized, {
           suppressNotifications,
         });
@@ -562,6 +595,7 @@ export default function HomePage() {
       } catch (error) {
         console.error("Failed to persist recipe order", error);
         showToast("Unable to sync recipe order. We'll retry soon.", "error");
+        pendingReorderRef.current = null;
       }
     },
     [isAuthenticated, showToast]
@@ -1530,7 +1564,7 @@ export default function HomePage() {
       if (!draggingRecipeId) {
         return;
       }
-      let nextOrderIds: string[] | null = null;
+      let nextOrderIds: string[] = [];
       setRecipes((current) => {
         const ordered = [...current].sort((a, b) => a.order - b.order);
         const movingIndex = ordered.findIndex(
@@ -1557,9 +1591,10 @@ export default function HomePage() {
           order: index,
         }));
         nextOrderIds = next.map((recipe) => recipe.id);
+        pendingReorderRef.current = nextOrderIds;
         return next;
       });
-      const orderedIds = nextOrderIds ?? [];
+      const orderedIds = nextOrderIds;
       if (isAuthenticated && orderedIds.length > 0) {
         if (isClientOnline) {
           void persistRecipeOrder(orderedIds);
