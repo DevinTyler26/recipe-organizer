@@ -305,6 +305,8 @@ export default function HomePage() {
   const [draggingRecipeId, setDraggingRecipeId] = useState<string | null>(null);
   const recipeUpdateLedgerRef = useRef<Map<string, string>>(new Map());
   const hasPrimedRecipeLedgerRef = useRef(false);
+  const recipeFormRef = useRef<HTMLFormElement | null>(null);
+  const recipeTitleInputRef = useRef<HTMLInputElement | null>(null);
   const currentUserId = session?.user?.id ?? null;
   const orderedRecipes = useMemo(
     () => [...recipes].sort((a, b) => a.order - b.order),
@@ -891,6 +893,24 @@ export default function HomePage() {
     });
   }, []);
 
+  useEffect(() => {
+    if (!editingRecipeId || typeof window === "undefined") {
+      return;
+    }
+    const formElement = recipeFormRef.current;
+    if (!formElement) {
+      return;
+    }
+    const prefersMobileLayout = window.matchMedia("(max-width: 767px)");
+    if (!prefersMobileLayout.matches) {
+      return;
+    }
+    window.requestAnimationFrame(() => {
+      formElement.scrollIntoView({ behavior: "smooth", block: "start" });
+      recipeTitleInputRef.current?.focus({ preventScroll: true });
+    });
+  }, [editingRecipeId]);
+
   const requestDeleteRecipe = useCallback((recipe: Recipe) => {
     setPendingDeletionRecipe(recipe);
   }, []);
@@ -1166,6 +1186,7 @@ export default function HomePage() {
 
         <section className="mt-2 grid gap-10 lg:grid-cols-[1.1fr_0.9fr]">
           <form
+            ref={recipeFormRef}
             onSubmit={handleSubmit}
             className="rounded-3xl border border-white/70 bg-white/90 p-8 shadow-xl shadow-amber-100/60 backdrop-blur"
           >
@@ -1190,6 +1211,7 @@ export default function HomePage() {
               <label className="block text-sm font-medium text-slate-700">
                 Recipe title
                 <input
+                  ref={recipeTitleInputRef}
                   value={form.title}
                   onChange={(event) =>
                     setForm((prev) => ({ ...prev, title: event.target.value }))
@@ -1617,7 +1639,7 @@ export default function HomePage() {
                             </div>
                           )}
                         </div>
-                        <div className="flex flex-col items-end gap-2 text-right">
+                        <div className="flex flex-col items-start gap-2 text-left sm:items-end sm:text-right">
                           {isAuthenticated && recipe.isFavorite && (
                             <span className="rounded-full bg-rose-100 px-3 py-1 text-xs font-semibold text-rose-600">
                               Favorited
