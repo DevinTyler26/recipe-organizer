@@ -156,6 +156,10 @@ type OfflineRecipeMutation =
   | {
       kind: "DELETE";
       targetId: string;
+    }
+  | {
+      kind: "REORDER";
+      orderedIds: string[];
     };
 
 const generateRecipeId = () => {
@@ -357,6 +361,24 @@ export default function HomePage() {
     },
     []
   );
+  const queueOfflineReorder = useCallback(
+    (orderedIds: string[]) => {
+      const sanitizedIds = orderedIds.filter(
+        (id) => typeof id === "string" && id.length > 0
+      );
+      if (!sanitizedIds.length) {
+        return;
+      }
+      const withoutReorder = offlineRecipeMutationsRef.current.filter(
+        (entry) => entry.kind !== "REORDER"
+      );
+      updateOfflineRecipeQueue([
+        ...withoutReorder,
+        { kind: "REORDER", orderedIds: sanitizedIds },
+      ]);
+    },
+    [updateOfflineRecipeQueue]
+  );
   const currentUserId = session?.user?.id ?? null;
   const orderedRecipes = useMemo(
     () => [...recipes].sort((a, b) => a.order - b.order),
@@ -511,17 +533,12 @@ export default function HomePage() {
         }
       }
     },
-    [
-      isAuthenticated,
-      isClientOnline,
-      noteCollaboratorRecipeUpdates,
-      showToast,
-    ]
+    [isAuthenticated, isClientOnline, noteCollaboratorRecipeUpdates, showToast]
   );
 
   const persistRecipeOrder = useCallback(
     async (orderedIds: string[]) => {
-      if (!isAuthenticated || orderedIds.length === 0) {
+      if (!isAuthenticated || orderedIds.length === 0 || !isClientOnline) {
         return;
       }
 
@@ -542,7 +559,7 @@ export default function HomePage() {
         showToast("Unable to sync recipe order. We'll retry soon.", "error");
       }
     },
-    [isAuthenticated, showToast]
+    [isAuthenticated, isClientOnline, showToast]
   );
 
   const flushOfflineRecipeQueue = useCallback(async () => {
@@ -589,6 +606,19 @@ export default function HomePage() {
               return next;
             });
             showToast(`${savedRecipe.title} synced once you were back online.`);
+            pending = pending.filter((entry) => entry !== mutation);
+            pending = pending.map((entry) => {
+              if (entry.kind !== "REORDER") {
+                return entry;
+              }
+              const remappedIds = entry.orderedIds.map((id) =>
+                id === mutation.tempId ? savedRecipe.id : id
+              );
+              const changed = remappedIds.some(
+                (id, idx) => id !== entry.orderedIds[idx]
+              );
+              return changed ? { ...entry, orderedIds: remappedIds } : entry;
+            });
           } else if (mutation.kind === "UPDATE") {
             const response = await fetch("/api/recipes", {
               method: "PUT",
@@ -611,6 +641,7 @@ export default function HomePage() {
             showToast(
               `${updatedRecipe.title} updates synced once you were back online.`
             );
+            pending = pending.filter((entry) => entry !== mutation);
           } else if (mutation.kind === "DELETE") {
             const response = await fetch("/api/recipes", {
               method: "DELETE",
@@ -624,8 +655,22 @@ export default function HomePage() {
               throw new Error(body?.error ?? "Failed to sync offline deletion");
             }
             showToast(`Recipe removed once you were back online.`, "info");
+            pending = pending.filter((entry) => entry !== mutation);
+          } else if (mutation.kind === "REORDER") {
+            const response = await fetch("/api/recipes/reorder", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ order: mutation.orderedIds }),
+            });
+            if (!response.ok) {
+              const body = (await response.json().catch(() => null)) as {
+                error?: string;
+              } | null;
+              throw new Error(body?.error ?? "Failed to sync offline ordering");
+            }
+            showToast("Recipe order synced once you were back online.", "info");
+            pending = pending.filter((entry) => entry !== mutation);
           }
-          pending = pending.filter((entry) => entry !== mutation);
         } catch (error) {
           console.error("Failed to sync offline recipe", error);
         }
@@ -1480,6 +1525,7 @@ export default function HomePage() {
       if (!draggingRecipeId) {
         return;
       }
+      let nextOrderIds: string[] | null = null;
       setRecipes((current) => {
         const ordered = [...current].sort((a, b) => a.order - b.order);
         const movingIndex = ordered.findIndex(
@@ -1505,14 +1551,27 @@ export default function HomePage() {
           ...recipe,
           order: index,
         }));
-        if (isAuthenticated) {
-          void persistRecipeOrder(next.map((recipe) => recipe.id));
-        }
+        nextOrderIds = next.map((recipe) => recipe.id);
         return next;
       });
+      const orderedIds = nextOrderIds ?? [];
+      if (isAuthenticated && orderedIds.length > 0) {
+        if (isClientOnline) {
+          void persistRecipeOrder(orderedIds);
+        } else {
+          queueOfflineReorder(orderedIds);
+        }
+      }
       finalizeRecipeDrag();
     },
-    [draggingRecipeId, finalizeRecipeDrag, isAuthenticated, persistRecipeOrder]
+    [
+      draggingRecipeId,
+      finalizeRecipeDrag,
+      isAuthenticated,
+      isClientOnline,
+      persistRecipeOrder,
+      queueOfflineReorder,
+    ]
   );
 
   const beginRecipeDrag = useCallback(
@@ -2221,6 +2280,14 @@ function readOfflineRecipeQueue(): OfflineRecipeMutation[] {
       }
       if (entry.kind === "DELETE") {
         return typeof entry.targetId === "string" && entry.targetId.length > 0;
+      }
+      if (entry.kind === "REORDER") {
+        return (
+          Array.isArray(entry.orderedIds) &&
+          entry.orderedIds.every(
+            (id: unknown) => typeof id === "string" && id.length > 0
+          )
+        );
       }
       return false;
     });
