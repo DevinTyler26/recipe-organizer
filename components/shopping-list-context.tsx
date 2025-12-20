@@ -47,6 +47,7 @@ type ShoppingListContextValue = {
   externalUpdateNotice: ExternalListUpdateNotice | null;
   acknowledgeExternalUpdate: () => void;
   refreshCollaborativeLists: () => Promise<void>;
+  hasLoadedStoredSelection: boolean;
 };
 
 type OwnerListState = {
@@ -1033,6 +1034,7 @@ export function ShoppingListProvider({ children }: { children: ReactNode }) {
       externalUpdateNotice,
       acknowledgeExternalUpdate,
       refreshCollaborativeLists,
+      hasLoadedStoredSelection,
     }),
     [
       items,
@@ -1050,6 +1052,7 @@ export function ShoppingListProvider({ children }: { children: ReactNode }) {
       externalUpdateNotice,
       acknowledgeExternalUpdate,
       refreshCollaborativeLists,
+      hasLoadedStoredSelection,
     ]
   );
 

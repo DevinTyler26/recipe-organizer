@@ -94,6 +94,13 @@ const MEASURE_DEFINITIONS: MeasureDefinition[] = [
   },
 ];
 
+export const MEASURE_OPTIONS = MEASURE_DEFINITIONS.map(
+  ({ canonical, plural }) => ({
+    value: canonical,
+    label: plural ?? `${canonical}s`,
+  })
+);
+
 const MEASURE_LOOKUP: Record<string, MeasureInfo> = {};
 
 MEASURE_DEFINITIONS.forEach(({ canonical, plural, aliases }) => {
