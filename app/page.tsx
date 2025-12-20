@@ -342,7 +342,12 @@ export default function HomePage() {
   );
   const [sortPreferenceLoaded, setSortPreferenceLoaded] = useState(false);
   const [draggingRecipeId, setDraggingRecipeId] = useState<string | null>(null);
-  const [isClientOnline, setIsClientOnline] = useState(true);
+  const [isClientOnline, setIsClientOnline] = useState(() => {
+    if (typeof window === "undefined") {
+      return true;
+    }
+    return window.navigator.onLine;
+  });
   const recipeUpdateLedgerRef = useRef<Map<string, string>>(new Map());
   const hasPrimedRecipeLedgerRef = useRef(false);
   const recipeFormRef = useRef<HTMLFormElement | null>(null);
@@ -538,7 +543,7 @@ export default function HomePage() {
 
   const persistRecipeOrder = useCallback(
     async (orderedIds: string[]) => {
-      if (!isAuthenticated || orderedIds.length === 0 || !isClientOnline) {
+      if (!isAuthenticated || orderedIds.length === 0) {
         return;
       }
 
@@ -559,7 +564,7 @@ export default function HomePage() {
         showToast("Unable to sync recipe order. We'll retry soon.", "error");
       }
     },
-    [isAuthenticated, isClientOnline, showToast]
+    [isAuthenticated, showToast]
   );
 
   const flushOfflineRecipeQueue = useCallback(async () => {
