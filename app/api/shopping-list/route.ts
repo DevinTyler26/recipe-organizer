@@ -204,20 +204,20 @@ export async function POST(request: Request) {
   }));
 
   try {
-    const operations: Parameters<typeof prisma.$transaction>[0] = [];
     if (uniqueLabels.length) {
-      operations.push(
+      await prisma.$transaction([
         prisma.shoppingListEntry.updateMany({
           where: {
             ownerId: targetOwnerId,
             normalizedLabel: { in: uniqueLabels },
           },
           data: { crossedOffAt: null, updatedById: user.id },
-        })
-      );
+        }),
+        prisma.shoppingListEntry.createMany({ data: entriesToCreate }),
+      ]);
+    } else {
+      await prisma.shoppingListEntry.createMany({ data: entriesToCreate });
     }
-    operations.push(prisma.shoppingListEntry.createMany({ data: entriesToCreate }));
-    await prisma.$transaction(operations);
     return NextResponse.json({ inserted: entriesToCreate.length }, { status: 201 });
   } catch (error) {
     console.error("Failed to persist shopping list entries", error);
