@@ -123,6 +123,23 @@ const starterRecipes: Recipe[] = [
 ];
 
 const LOCAL_RECIPES_KEY = "recipe-library-local";
+const REMOTE_RECIPES_CACHE_KEY = "recipe-library-remote";
+const OFFLINE_RECIPE_QUEUE_KEY = "recipe-library-offline-mutations";
+
+type RecipeDraftPayload = {
+  title: string;
+  summary: string | null;
+  ingredients: string[];
+  tags: string[];
+  shareWithOwnerId?: string | null;
+  collaboratorIds?: string[];
+};
+
+type OfflineRecipeMutation = {
+  kind: "CREATE";
+  tempId: string;
+  payload: RecipeDraftPayload;
+};
 
 const generateRecipeId = () => {
   if (
@@ -293,6 +310,7 @@ export default function HomePage() {
   );
   const [guestLibraryLoaded, setGuestLibraryLoaded] = useState(false);
   const [recipesLoaded, setRecipesLoaded] = useState(false);
+  const [offlineQueueVersion, setOfflineQueueVersion] = useState(0);
   const [shareWithCurrentCollaborators, setShareWithCurrentCollaborators] =
     useState(true);
   const [libraryFilter, setLibraryFilter] = useState<"all" | "favorites">(
@@ -303,10 +321,24 @@ export default function HomePage() {
   );
   const [sortPreferenceLoaded, setSortPreferenceLoaded] = useState(false);
   const [draggingRecipeId, setDraggingRecipeId] = useState<string | null>(null);
+  const [isClientOnline, setIsClientOnline] = useState(true);
   const recipeUpdateLedgerRef = useRef<Map<string, string>>(new Map());
   const hasPrimedRecipeLedgerRef = useRef(false);
   const recipeFormRef = useRef<HTMLFormElement | null>(null);
   const recipeTitleInputRef = useRef<HTMLInputElement | null>(null);
+  const offlineRecipeMutationsRef = useRef<OfflineRecipeMutation[]>([]);
+  const offlineRecipeQueueHydratedRef = useRef(false);
+  const offlineRecipeQueueFlushInFlightRef = useRef(false);
+  const updateOfflineRecipeQueue = useCallback(
+    (mutations: OfflineRecipeMutation[]) => {
+      offlineRecipeMutationsRef.current = mutations;
+      if (offlineRecipeQueueHydratedRef.current) {
+        persistOfflineRecipeQueue(mutations);
+      }
+      setOfflineQueueVersion((current) => current + 1);
+    },
+    []
+  );
   const currentUserId = session?.user?.id ?? null;
   const orderedRecipes = useMemo(
     () => [...recipes].sort((a, b) => a.order - b.order),
@@ -441,6 +473,7 @@ export default function HomePage() {
           body?.recipes as StoredRecipe[] | undefined
         );
         setRecipes(normalized);
+        persistRemoteRecipeCache(normalized);
         noteCollaboratorRecipeUpdates(normalized, {
           suppressNotifications,
         });
@@ -486,6 +519,63 @@ export default function HomePage() {
     [isAuthenticated, showToast]
   );
 
+  const flushOfflineRecipeQueue = useCallback(async () => {
+    if (
+      !isAuthenticated ||
+      !isClientOnline ||
+      offlineRecipeQueueFlushInFlightRef.current ||
+      !offlineRecipeQueueHydratedRef.current
+    ) {
+      return;
+    }
+    const queueSnapshot = [...offlineRecipeMutationsRef.current];
+    if (!queueSnapshot.length) {
+      return;
+    }
+    offlineRecipeQueueFlushInFlightRef.current = true;
+    try {
+      let pending = queueSnapshot;
+      for (const mutation of queueSnapshot) {
+        try {
+          if (mutation.kind !== "CREATE") {
+            continue;
+          }
+          const response = await fetch("/api/recipes", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(mutation.payload),
+          });
+          const body = (await response.json().catch(() => null)) as {
+            recipe?: Recipe;
+            error?: string;
+          } | null;
+          if (!response.ok || !body?.recipe) {
+            throw new Error(body?.error ?? "Failed to sync offline recipe");
+          }
+          const savedRecipe = normalizeRecipe(body.recipe as StoredRecipe);
+          setRecipes((current) => {
+            const index = current.findIndex(
+              (recipe) => recipe.id === mutation.tempId
+            );
+            if (index === -1) {
+              return [savedRecipe, ...current];
+            }
+            const next = [...current];
+            next[index] = savedRecipe;
+            return next;
+          });
+          pending = pending.filter((entry) => entry.tempId !== mutation.tempId);
+          showToast(`${savedRecipe.title} synced once you were back online.`);
+        } catch (error) {
+          console.error("Failed to sync offline recipe", error);
+        }
+      }
+      updateOfflineRecipeQueue(pending);
+    } finally {
+      offlineRecipeQueueFlushInFlightRef.current = false;
+    }
+  }, [isAuthenticated, isClientOnline, showToast, updateOfflineRecipeQueue]);
+
   const resetFormState = useCallback(() => {
     setForm(emptyForm);
     setEditingRecipeId(null);
@@ -496,7 +586,36 @@ export default function HomePage() {
   }, [isAuthenticated, refreshCollaborations]);
 
   useEffect(() => {
+    if (typeof window === "undefined") {
+      return;
+    }
+    const syncStatus = () => {
+      setIsClientOnline(window.navigator.onLine);
+    };
+    syncStatus();
+    window.addEventListener("online", syncStatus);
+    window.addEventListener("offline", syncStatus);
+    return () => {
+      window.removeEventListener("online", syncStatus);
+      window.removeEventListener("offline", syncStatus);
+    };
+  }, []);
+
+  useEffect(() => {
     if (!isAuthenticated) {
+      offlineRecipeQueueHydratedRef.current = true;
+      updateOfflineRecipeQueue([]);
+      clearOfflineRecipeQueue();
+      return;
+    }
+    const storedQueue = readOfflineRecipeQueue();
+    offlineRecipeQueueHydratedRef.current = true;
+    updateOfflineRecipeQueue(storedQueue);
+  }, [isAuthenticated, updateOfflineRecipeQueue]);
+
+  useEffect(() => {
+    if (!isAuthenticated) {
+      clearRemoteRecipeCache();
       try {
         const storedRecipes = window.localStorage.getItem(LOCAL_RECIPES_KEY);
         if (storedRecipes) {
@@ -524,7 +643,13 @@ export default function HomePage() {
     }
 
     setGuestLibraryLoaded(false);
-    setRecipesLoaded(false);
+    const cachedRecipes = readRemoteRecipeCache();
+    if (cachedRecipes.length) {
+      setRecipes(cachedRecipes);
+      setRecipesLoaded(true);
+    } else {
+      setRecipesLoaded(false);
+    }
     recipeUpdateLedgerRef.current.clear();
     hasPrimedRecipeLedgerRef.current = false;
     void fetchRemoteRecipes({ suppressNotifications: true });
@@ -559,6 +684,23 @@ export default function HomePage() {
       document.removeEventListener("visibilitychange", handleVisibility);
     };
   }, [fetchRemoteRecipes, isAuthenticated]);
+
+  useEffect(() => {
+    if (
+      !isAuthenticated ||
+      !isClientOnline ||
+      !offlineRecipeQueueHydratedRef.current ||
+      !offlineRecipeMutationsRef.current.length
+    ) {
+      return;
+    }
+    void flushOfflineRecipeQueue();
+  }, [
+    flushOfflineRecipeQueue,
+    isAuthenticated,
+    isClientOnline,
+    offlineQueueVersion,
+  ]);
 
   useEffect(() => {
     if (!isAuthenticated) {
@@ -626,6 +768,13 @@ export default function HomePage() {
   }, [guestLibraryLoaded, isAuthenticated, recipes]);
 
   useEffect(() => {
+    if (!isAuthenticated || !recipesLoaded) {
+      return;
+    }
+    persistRemoteRecipeCache(recipes);
+  }, [isAuthenticated, recipes, recipesLoaded]);
+
+  useEffect(() => {
     if (!sortPreferenceLoaded || typeof window === "undefined") {
       return;
     }
@@ -659,6 +808,19 @@ export default function HomePage() {
     const collaboratorIdsPayload = shouldShareCollaborators
       ? activeListCollaborators.map((collaborator) => collaborator.id)
       : undefined;
+    const collaboratorDescriptor = shouldShareCollaborators
+      ? summarizeCollaborators(activeListCollaborators)
+      : "";
+    const collaboratorSuffix = collaboratorDescriptor
+      ? ` plus ${collaboratorDescriptor}`
+      : "";
+    const draftPayload: RecipeDraftPayload = { ...payload };
+    if (shareTargetOwnerId) {
+      draftPayload.shareWithOwnerId = shareTargetOwnerId;
+    }
+    if (collaboratorIdsPayload?.length) {
+      draftPayload.collaboratorIds = collaboratorIdsPayload;
+    }
 
     setIsSaving(true);
     if (editingRecipeId) {
@@ -753,19 +915,60 @@ export default function HomePage() {
       return;
     }
 
-    try {
-      const requestBody: Record<string, unknown> = { ...payload };
-      if (shareTargetOwnerId) {
-        requestBody.shareWithOwnerId = shareTargetOwnerId;
-      }
-      if (collaboratorIdsPayload?.length) {
-        requestBody.collaboratorIds = collaboratorIdsPayload;
-      }
+    if (!isClientOnline) {
+      const tempId = generateRecipeId();
+      const nextLocalOrder =
+        recipes.length > 0
+          ? Math.min(...recipes.map((existing) => existing.order)) - 1
+          : 0;
+      const offlineOwner: RecipeOwner = session?.user?.id
+        ? {
+            id: session.user.id,
+            name: session.user.name ?? null,
+            email: session.user.email ?? null,
+          }
+        : null;
+      const offlineRecipe: Recipe = {
+        id: tempId,
+        title: trimmedTitle,
+        summary: payload.summary,
+        ingredients,
+        tags,
+        isFavorite: false,
+        order: nextLocalOrder,
+        owner: offlineOwner,
+        updatedAt: new Date().toISOString(),
+        updatedBy: offlineOwner,
+        updatedById: offlineOwner?.id ?? null,
+      };
+      const offlineMutation: OfflineRecipeMutation = {
+        kind: "CREATE",
+        tempId,
+        payload: draftPayload,
+      };
+      setRecipes((current) => [offlineRecipe, ...current]);
+      updateOfflineRecipeQueue([
+        ...offlineRecipeMutationsRef.current,
+        offlineMutation,
+      ]);
+      setRecipesLoaded(true);
+      resetFormState();
+      const offlineShareLabel = shareRecipientLabel
+        ? `${shareRecipientLabel}${collaboratorSuffix}`
+        : collaboratorDescriptor;
+      const offlineToastMessage = offlineShareLabel
+        ? `${offlineRecipe.title} saved offline. We'll sync and share with ${offlineShareLabel} once you're back online.`
+        : `${offlineRecipe.title} saved offline. We'll sync it once you're back online.`;
+      showToast(offlineToastMessage, "info");
+      setIsSaving(false);
+      return;
+    }
 
+    try {
       const response = await fetch("/api/recipes", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(requestBody),
+        body: JSON.stringify(draftPayload),
       });
       const body = (await response.json().catch(() => null)) as {
         recipe?: Recipe;
@@ -777,12 +980,6 @@ export default function HomePage() {
       const savedRecipe = normalizeRecipe(body.recipe as StoredRecipe);
       setRecipes((current) => [savedRecipe, ...current]);
       resetFormState();
-      const collaboratorDescriptor = shouldShareCollaborators
-        ? summarizeCollaborators(activeListCollaborators)
-        : "";
-      const collaboratorSuffix = collaboratorDescriptor
-        ? ` plus ${collaboratorDescriptor}`
-        : "";
       const toastMessage = shareRecipientLabel
         ? `${savedRecipe.title} is ready and now shared with ${shareRecipientLabel}${collaboratorSuffix}.`
         : collaboratorDescriptor
@@ -1738,4 +1935,97 @@ export default function HomePage() {
       )}
     </div>
   );
+}
+
+function readRemoteRecipeCache(): Recipe[] {
+  if (typeof window === "undefined") {
+    return [];
+  }
+  const raw = window.localStorage.getItem(REMOTE_RECIPES_CACHE_KEY);
+  if (!raw) {
+    return [];
+  }
+  try {
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) {
+      return [];
+    }
+    return parsed.map((entry) => normalizeRecipe(entry as StoredRecipe));
+  } catch (error) {
+    console.warn("Failed to parse cached recipes", error);
+    return [];
+  }
+}
+
+function persistRemoteRecipeCache(recipes: Recipe[]) {
+  if (typeof window === "undefined") {
+    return;
+  }
+  try {
+    if (!recipes.length) {
+      window.localStorage.removeItem(REMOTE_RECIPES_CACHE_KEY);
+      return;
+    }
+    window.localStorage.setItem(
+      REMOTE_RECIPES_CACHE_KEY,
+      JSON.stringify(recipes)
+    );
+  } catch (error) {
+    console.warn("Failed to cache recipes", error);
+  }
+}
+
+function clearRemoteRecipeCache() {
+  if (typeof window === "undefined") {
+    return;
+  }
+  window.localStorage.removeItem(REMOTE_RECIPES_CACHE_KEY);
+}
+
+function readOfflineRecipeQueue(): OfflineRecipeMutation[] {
+  if (typeof window === "undefined") {
+    return [];
+  }
+  const raw = window.localStorage.getItem(OFFLINE_RECIPE_QUEUE_KEY);
+  if (!raw) {
+    return [];
+  }
+  try {
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) {
+      return [];
+    }
+    return parsed.filter(
+      (entry): entry is OfflineRecipeMutation =>
+        typeof entry?.kind === "string" && entry.kind === "CREATE"
+    );
+  } catch (error) {
+    console.warn("Failed to parse offline recipe queue", error);
+    return [];
+  }
+}
+
+function persistOfflineRecipeQueue(mutations: OfflineRecipeMutation[]) {
+  if (typeof window === "undefined") {
+    return;
+  }
+  try {
+    if (!mutations.length) {
+      window.localStorage.removeItem(OFFLINE_RECIPE_QUEUE_KEY);
+      return;
+    }
+    window.localStorage.setItem(
+      OFFLINE_RECIPE_QUEUE_KEY,
+      JSON.stringify(mutations)
+    );
+  } catch (error) {
+    console.warn("Failed to cache offline recipe queue", error);
+  }
+}
+
+function clearOfflineRecipeQueue() {
+  if (typeof window === "undefined") {
+    return;
+  }
+  window.localStorage.removeItem(OFFLINE_RECIPE_QUEUE_KEY);
 }
