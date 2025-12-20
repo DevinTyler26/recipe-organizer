@@ -3,7 +3,7 @@
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { signIn, signOut, useSession } from "next-auth/react";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState, type FormEvent } from "react";
 import { useShoppingList } from "@/components/shopping-list-context";
 import { useCollaborationUI } from "@/components/collaboration-ui-context";
 
@@ -22,6 +22,7 @@ export function AppNav({ className = "" }: AppNavProps) {
     lists,
     selectedListId,
     selectList,
+    renameList,
     totalItems,
     hasLoadedStoredSelection,
   } = useShoppingList();
@@ -33,6 +34,10 @@ export function AppNav({ className = "" }: AppNavProps) {
   } = useCollaborationUI();
   const [isListMenuOpen, setIsListMenuOpen] = useState(false);
   const [isNavMenuOpen, setIsNavMenuOpen] = useState(false);
+  const [isEditingListName, setIsEditingListName] = useState(false);
+  const [listNameDraft, setListNameDraft] = useState("");
+  const [isSavingListName, setIsSavingListName] = useState(false);
+  const [listNameError, setListNameError] = useState<string | null>(null);
   const pathname = usePathname();
   const [isOnline, setIsOnline] = useState<boolean | null>(null);
 
@@ -49,6 +54,17 @@ export function AppNav({ className = "" }: AppNavProps) {
     return lists[0] ?? null;
   }, [lists, selectedListId]);
 
+  const activeListOwnerId = activeShoppingList?.ownerId ?? null;
+  const activeListOwnerLabel = activeShoppingList?.ownerLabel ?? "";
+
+  useEffect(() => {
+    if (activeListOwnerId) {
+      setListNameDraft(activeListOwnerLabel);
+    } else {
+      setListNameDraft("");
+    }
+  }, [activeListOwnerId, activeListOwnerLabel]);
+
   const shoppingListDestinationLabel =
     hasLoadedStoredSelection && activeShoppingList
       ? activeShoppingList.ownerLabel
@@ -61,6 +77,10 @@ export function AppNav({ className = "" }: AppNavProps) {
       isAuthenticated &&
       activeShoppingList?.isSelf &&
       currentUserId
+  );
+
+  const canRenameActiveList = Boolean(
+    hasLoadedStoredSelection && activeShoppingList?.isSelf
   );
 
   const shoppingListCollaborators = useMemo(() => {
@@ -89,6 +109,13 @@ export function AppNav({ className = "" }: AppNavProps) {
       window.removeEventListener("offline", syncOnlineStatus);
     };
   }, []);
+
+  useEffect(() => {
+    if (!canRenameActiveList) {
+      setIsEditingListName(false);
+      setListNameError(null);
+    }
+  }, [canRenameActiveList]);
 
   const connectionLabel = useMemo(() => {
     if (!isAuthenticated) {
@@ -141,6 +168,13 @@ export function AppNav({ className = "" }: AppNavProps) {
     return () => document.removeEventListener("mousedown", handleClick);
   }, [isListMenuOpen]);
 
+  useEffect(() => {
+    if (!isListMenuOpen) {
+      setIsEditingListName(false);
+      setListNameError(null);
+    }
+  }, [isListMenuOpen]);
+
   const handleInviteClick = () => {
     if (!currentUserId || !activeShoppingList) {
       return;
@@ -169,6 +203,30 @@ export function AppNav({ className = "" }: AppNavProps) {
     });
   };
 
+  const handleListRenameSubmit = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    if (!activeShoppingList) {
+      return;
+    }
+    const draft = listNameDraft.trim();
+    if (!draft) {
+      setListNameError("Enter a list name.");
+      return;
+    }
+    setIsSavingListName(true);
+    setListNameError(null);
+    try {
+      await renameList(activeShoppingList.ownerId, draft);
+      setIsEditingListName(false);
+    } catch (error) {
+      const message =
+        error instanceof Error ? error.message : "Unable to rename this list.";
+      setListNameError(message);
+    } finally {
+      setIsSavingListName(false);
+    }
+  };
+
   const renderListMenuContent = () => (
     <>
       {activeShoppingList ? (
@@ -179,8 +237,64 @@ export function AppNav({ className = "" }: AppNavProps) {
           <p className="text-xs text-slate-500">
             {activeShoppingList.isSelf
               ? "Owned by you"
-              : `Shared from ${activeShoppingList.ownerLabel}`}
+              : `Shared from ${
+                  activeShoppingList.ownerDisplayName || "a collaborator"
+                }`}
           </p>
+          {canRenameActiveList && (
+            <div className="mt-3 rounded-2xl border border-slate-100 bg-white/80 p-3 text-xs text-slate-600">
+              {isEditingListName ? (
+                <form className="space-y-2" onSubmit={handleListRenameSubmit}>
+                  <label className="flex flex-col gap-1 text-[10px] font-semibold uppercase tracking-[0.3em] text-slate-400">
+                    List name
+                    <input
+                      value={listNameDraft}
+                      onChange={(event) => setListNameDraft(event.target.value)}
+                      className="rounded-xl border border-slate-200 bg-white/90 px-3 py-2 text-xs font-semibold tracking-[0.1em] text-slate-700 outline-none transition focus:border-rose-400 focus:ring-2 focus:ring-rose-100"
+                      disabled={isSavingListName}
+                    />
+                  </label>
+                  {listNameError && (
+                    <p className="text-[11px] font-semibold text-rose-500">
+                      {listNameError}
+                    </p>
+                  )}
+                  <div className="flex flex-wrap gap-2">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setIsEditingListName(false);
+                        setListNameError(null);
+                        setListNameDraft(activeShoppingList.ownerLabel);
+                      }}
+                      className="rounded-full border border-slate-200 px-3 py-1 text-[10px] font-semibold uppercase tracking-[0.3em] text-slate-500"
+                      disabled={isSavingListName}
+                    >
+                      Cancel
+                    </button>
+                    <button
+                      type="submit"
+                      className="rounded-full bg-slate-900 px-4 py-1 text-[10px] font-semibold uppercase tracking-[0.3em] text-white disabled:opacity-60"
+                      disabled={isSavingListName}
+                    >
+                      {isSavingListName ? "Saving…" : "Save"}
+                    </button>
+                  </div>
+                </form>
+              ) : (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setListNameError(null);
+                    setIsEditingListName(true);
+                  }}
+                  className="w-full rounded-full border border-slate-200 px-3 py-2 text-[10px] font-semibold uppercase tracking-[0.3em] text-slate-600 transition hover:border-slate-300"
+                >
+                  Rename list
+                </button>
+              )}
+            </div>
+          )}
         </>
       ) : (
         <p className="text-slate-500">Select a list to manage it here.</p>
