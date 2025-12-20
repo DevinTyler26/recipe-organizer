@@ -30,17 +30,41 @@ export const authOptions = {
 
       return true;
     },
-    session({ session, token }: { session: Session; token: JWT }) {
-      if (session.user && token.sub) {
-        session.user.id = token.sub;
+    async session({ session, token }: { session: Session; token: JWT }) {
+      if (session.user) {
+        if (token.sub) {
+          session.user.id = token.sub;
+        }
+        session.user.isAdmin = Boolean(token.isAdmin);
+        session.user.shoppingListLabel = token.shoppingListLabel ?? null;
       }
       return session;
+    },
+    async jwt({ token }: { token: JWT }) {
+      if (!token.sub) {
+        token.isAdmin = false;
+        token.shoppingListLabel = null;
+        return token;
+      }
+
+      const user = await prisma.user.findUnique({
+        where: { id: token.sub },
+        select: { isAdmin: true, shoppingListLabel: true },
+      });
+
+      token.isAdmin = Boolean(user?.isAdmin);
+      token.shoppingListLabel = user?.shoppingListLabel ?? null;
+      return token;
     },
   },
   secret: process.env.AUTH_SECRET,
 } satisfies NextAuthOptions;
 
-type SessionUser = NonNullable<Session["user"]> & { id: string };
+type SessionUser = NonNullable<Session["user"]> & {
+  id: string;
+  isAdmin: boolean;
+  shoppingListLabel?: string | null;
+};
 
 export async function getCurrentUser(): Promise<SessionUser | null> {
   const session = await getServerSession(authOptions);
@@ -50,15 +74,17 @@ export async function getCurrentUser(): Promise<SessionUser | null> {
 
   const userId = session.user.id;
 
-  const existingUser = await prisma.user.findUnique({ where: { id: userId } });
+  let existingUser = await prisma.user.findUnique({ where: { id: userId } });
   if (!existingUser) {
     try {
-      await prisma.user.create({
+      existingUser = await prisma.user.create({
         data: {
           id: userId,
           email: session.user.email ?? null,
           name: session.user.name ?? null,
           image: session.user.image ?? null,
+          isAdmin: false,
+          shoppingListLabel: null,
         },
       });
     } catch (error) {
@@ -67,13 +93,28 @@ export async function getCurrentUser(): Promise<SessionUser | null> {
     }
   }
 
-  return session.user as SessionUser;
+  const sessionUser = session.user as SessionUser;
+  if (typeof sessionUser.isAdmin !== "boolean") {
+    sessionUser.isAdmin = Boolean(existingUser?.isAdmin);
+  }
+  if (typeof sessionUser.shoppingListLabel === "undefined") {
+    sessionUser.shoppingListLabel = existingUser?.shoppingListLabel ?? null;
+  }
+  return sessionUser;
 }
 
 export async function requireUser(): Promise<SessionUser> {
   const user = await getCurrentUser();
   if (!user) {
     throw new Error("Unauthorized");
+  }
+  return user;
+}
+
+export async function requireAdminUser(): Promise<SessionUser> {
+  const user = await requireUser();
+  if (!user.isAdmin) {
+    throw new Error("Forbidden");
   }
   return user;
 }

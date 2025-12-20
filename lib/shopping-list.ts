@@ -94,6 +94,13 @@ const MEASURE_DEFINITIONS: MeasureDefinition[] = [
   },
 ];
 
+export const MEASURE_OPTIONS = MEASURE_DEFINITIONS.map(
+  ({ canonical, plural }) => ({
+    value: canonical,
+    label: plural ?? `${canonical}s`,
+  })
+);
+
 const MEASURE_LOOKUP: Record<string, MeasureInfo> = {};
 
 MEASURE_DEFINITIONS.forEach(({ canonical, plural, aliases }) => {
@@ -200,6 +207,18 @@ export function summarizeEntries(entries: QuantityEntry[]): string {
   }
 
   return entries.map((entry) => entry.quantityText || "As listed").join(" + ");
+}
+
+export function collectSourceTitles(
+  entries: Array<{ sourceRecipeTitle?: string | null }>
+): string[] {
+  return Array.from(
+    new Set(
+      entries
+        .map((entry) => entry.sourceRecipeTitle?.trim())
+        .filter((title): title is string => Boolean(title))
+    )
+  );
 }
 
 export function normalizeMeasureText(value: string) {
