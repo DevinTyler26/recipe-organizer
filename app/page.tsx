@@ -346,6 +346,7 @@ export default function HomePage() {
   const offlineRecipeMutationsRef = useRef<OfflineRecipeMutation[]>([]);
   const offlineRecipeQueueHydratedRef = useRef(false);
   const offlineRecipeQueueFlushInFlightRef = useRef(false);
+  const liveUpdatesSourceRef = useRef<EventSource | null>(null);
   const updateOfflineRecipeQueue = useCallback(
     (mutations: OfflineRecipeMutation[]) => {
       offlineRecipeMutationsRef.current = mutations;
@@ -470,10 +471,13 @@ export default function HomePage() {
         suppressNotifications?: boolean;
       } = {}
     ) => {
-      if (!isAuthenticated) {
+      const { background = false, suppressNotifications = false } = options;
+      if (!isAuthenticated || !isClientOnline) {
+        if (!background) {
+          setIsSyncing(false);
+        }
         return;
       }
-      const { background = false, suppressNotifications = false } = options;
       if (!background) {
         setIsSyncing(true);
       }
@@ -507,7 +511,12 @@ export default function HomePage() {
         }
       }
     },
-    [isAuthenticated, noteCollaboratorRecipeUpdates, showToast]
+    [
+      isAuthenticated,
+      isClientOnline,
+      noteCollaboratorRecipeUpdates,
+      showToast,
+    ]
   );
 
   const persistRecipeOrder = useCallback(
@@ -707,26 +716,30 @@ export default function HomePage() {
   }, [fetchRemoteRecipes, isAuthenticated]);
 
   useEffect(() => {
-    if (!isAuthenticated) {
+    if (!isAuthenticated || !isClientOnline) {
       return;
     }
     const intervalId = window.setInterval(() => {
       void fetchRemoteRecipes({ background: true });
     }, RECIPE_REFRESH_INTERVAL_MS);
     return () => window.clearInterval(intervalId);
-  }, [fetchRemoteRecipes, isAuthenticated]);
+  }, [fetchRemoteRecipes, isAuthenticated, isClientOnline]);
 
   useEffect(() => {
     if (!isAuthenticated) {
       return;
     }
     const handleFocus = () => {
+      if (!isClientOnline) {
+        return;
+      }
       void fetchRemoteRecipes({ background: true });
     };
     const handleVisibility = () => {
-      if (document.visibilityState === "visible") {
-        void fetchRemoteRecipes({ background: true });
+      if (document.visibilityState !== "visible" || !isClientOnline) {
+        return;
       }
+      void fetchRemoteRecipes({ background: true });
     };
     window.addEventListener("focus", handleFocus);
     document.addEventListener("visibilitychange", handleVisibility);
@@ -734,7 +747,7 @@ export default function HomePage() {
       window.removeEventListener("focus", handleFocus);
       document.removeEventListener("visibilitychange", handleVisibility);
     };
-  }, [fetchRemoteRecipes, isAuthenticated]);
+  }, [fetchRemoteRecipes, isAuthenticated, isClientOnline]);
 
   useEffect(() => {
     if (
@@ -754,10 +767,18 @@ export default function HomePage() {
   ]);
 
   useEffect(() => {
-    if (!isAuthenticated) {
+    if (!isAuthenticated || !isClientOnline) {
+      if (liveUpdatesSourceRef.current) {
+        liveUpdatesSourceRef.current.close();
+        liveUpdatesSourceRef.current = null;
+      }
+      return;
+    }
+    if (liveUpdatesSourceRef.current) {
       return;
     }
     const source = new EventSource("/api/live");
+    liveUpdatesSourceRef.current = source;
     const handleMessage = () => {
       void fetchRemoteRecipes({ background: true });
       void refreshCollaborativeLists();
@@ -768,8 +789,16 @@ export default function HomePage() {
     };
     return () => {
       source.close();
+      if (liveUpdatesSourceRef.current === source) {
+        liveUpdatesSourceRef.current = null;
+      }
     };
-  }, [fetchRemoteRecipes, isAuthenticated, refreshCollaborativeLists]);
+  }, [
+    fetchRemoteRecipes,
+    isAuthenticated,
+    isClientOnline,
+    refreshCollaborativeLists,
+  ]);
 
   useEffect(() => {
     if (!externalUpdateNotice || !isAuthenticated) {
