@@ -125,6 +125,7 @@ const starterRecipes: Recipe[] = [
 const LOCAL_RECIPES_KEY = "recipe-library-local";
 const REMOTE_RECIPES_CACHE_KEY = "recipe-library-remote";
 const OFFLINE_RECIPE_QUEUE_KEY = "recipe-library-offline-mutations";
+const PENDING_RECIPE_ORDER_KEY = "recipe-library-pending-order";
 
 type RecipeDraftPayload = {
   title: string;
@@ -524,8 +525,18 @@ export default function HomePage() {
         const queuedReorder = offlineRecipeMutationsRef.current.find(
           (entry) => entry.kind === "REORDER"
         );
-        const pendingOrder =
+        let pendingOrder =
           pendingReorderRef.current ?? queuedReorder?.orderedIds ?? null;
+        if ((!pendingOrder || !pendingOrder.length) && queuedReorder) {
+          pendingOrder = queuedReorder.orderedIds;
+        }
+        if (!pendingOrder || !pendingOrder.length) {
+          const storedPendingOrder = readPendingRecipeOrder();
+          if (storedPendingOrder.length) {
+            pendingReorderRef.current = storedPendingOrder;
+            pendingOrder = storedPendingOrder;
+          }
+        }
         const remoteIds = normalized.map((recipe) => recipe.id);
         let resolvedRecipes = normalized;
         if (pendingOrder && pendingOrder.length) {
@@ -534,6 +545,7 @@ export default function HomePage() {
             pendingOrder.every((id, index) => id === remoteIds[index]);
           if (ordersMatch) {
             pendingReorderRef.current = null;
+            clearPendingRecipeOrder();
             if (!queuedReorder) {
               resolvedRecipes = normalized;
             }
@@ -602,7 +614,6 @@ export default function HomePage() {
       } catch (error) {
         console.error("Failed to persist recipe order", error);
         showToast("Unable to sync recipe order. We'll retry soon.", "error");
-        pendingReorderRef.current = null;
       }
     },
     [isAuthenticated, showToast]
@@ -1599,6 +1610,7 @@ export default function HomePage() {
         }));
         nextOrderIds = next.map((recipe) => recipe.id);
         pendingReorderRef.current = nextOrderIds;
+        persistPendingRecipeOrder(nextOrderIds);
         return next;
       });
       const orderedIds = nextOrderIds;
@@ -2367,4 +2379,51 @@ function clearOfflineRecipeQueue() {
     return;
   }
   window.localStorage.removeItem(OFFLINE_RECIPE_QUEUE_KEY);
+}
+
+function readPendingRecipeOrder(): string[] {
+  if (typeof window === "undefined") {
+    return [];
+  }
+  const raw = window.localStorage.getItem(PENDING_RECIPE_ORDER_KEY);
+  if (!raw) {
+    return [];
+  }
+  try {
+    const parsed = JSON.parse(raw);
+    if (
+      Array.isArray(parsed) &&
+      parsed.every((id: unknown) => typeof id === "string" && id.length > 0)
+    ) {
+      return parsed as string[];
+    }
+  } catch (error) {
+    console.warn("Failed to parse pending recipe order", error);
+  }
+  return [];
+}
+
+function persistPendingRecipeOrder(order: string[]) {
+  if (typeof window === "undefined") {
+    return;
+  }
+  try {
+    if (!order.length) {
+      window.localStorage.removeItem(PENDING_RECIPE_ORDER_KEY);
+      return;
+    }
+    window.localStorage.setItem(
+      PENDING_RECIPE_ORDER_KEY,
+      JSON.stringify(order)
+    );
+  } catch (error) {
+    console.warn("Failed to cache pending recipe order", error);
+  }
+}
+
+function clearPendingRecipeOrder() {
+  if (typeof window === "undefined") {
+    return;
+  }
+  window.localStorage.removeItem(PENDING_RECIPE_ORDER_KEY);
 }
