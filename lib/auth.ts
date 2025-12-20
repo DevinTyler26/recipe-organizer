@@ -36,28 +36,35 @@ export const authOptions = {
           session.user.id = token.sub;
         }
         session.user.isAdmin = Boolean(token.isAdmin);
+        session.user.shoppingListLabel = token.shoppingListLabel ?? null;
       }
       return session;
     },
     async jwt({ token }: { token: JWT }) {
       if (!token.sub) {
         token.isAdmin = false;
+        token.shoppingListLabel = null;
         return token;
       }
 
       const user = await prisma.user.findUnique({
         where: { id: token.sub },
-        select: { isAdmin: true },
+        select: { isAdmin: true, shoppingListLabel: true },
       });
 
       token.isAdmin = Boolean(user?.isAdmin);
+      token.shoppingListLabel = user?.shoppingListLabel ?? null;
       return token;
     },
   },
   secret: process.env.AUTH_SECRET,
 } satisfies NextAuthOptions;
 
-type SessionUser = NonNullable<Session["user"]> & { id: string; isAdmin: boolean };
+type SessionUser = NonNullable<Session["user"]> & {
+  id: string;
+  isAdmin: boolean;
+  shoppingListLabel?: string | null;
+};
 
 export async function getCurrentUser(): Promise<SessionUser | null> {
   const session = await getServerSession(authOptions);
@@ -77,6 +84,7 @@ export async function getCurrentUser(): Promise<SessionUser | null> {
           name: session.user.name ?? null,
           image: session.user.image ?? null,
           isAdmin: false,
+          shoppingListLabel: null,
         },
       });
     } catch (error) {
@@ -88,6 +96,9 @@ export async function getCurrentUser(): Promise<SessionUser | null> {
   const sessionUser = session.user as SessionUser;
   if (typeof sessionUser.isAdmin !== "boolean") {
     sessionUser.isAdmin = Boolean(existingUser?.isAdmin);
+  }
+  if (typeof sessionUser.shoppingListLabel === "undefined") {
+    sessionUser.shoppingListLabel = existingUser?.shoppingListLabel ?? null;
   }
   return sessionUser;
 }

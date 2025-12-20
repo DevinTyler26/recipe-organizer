@@ -26,12 +26,14 @@ import {
 
 const STORAGE_KEY = "recipe-organizer-shopping-list";
 const SELECTED_OWNER_STORAGE_KEY = "recipe-organizer-active-shopping-list";
+const LOCAL_OWNER_LABEL_STORAGE_KEY = "recipe-organizer-local-list-label";
 
 type ShoppingListContextValue = {
   items: ShoppingListItem[];
   lists: ShoppingListListMeta[];
   selectedListId: string | null;
   selectList: (ownerId: string) => void;
+  renameList: (ownerId: string, nextLabel: string) => Promise<void>;
   addItems: (items: IncomingIngredient[], ownerId?: string) => void;
   removeItem: (key: string, ownerId?: string) => void;
   clearList: (ownerId?: string) => void;
@@ -53,6 +55,7 @@ type ShoppingListContextValue = {
 type OwnerListState = {
   ownerId: string;
   ownerLabel: string;
+  ownerDisplayName: string;
   isSelf: boolean;
   state: ShoppingListState;
 };
@@ -82,6 +85,7 @@ type OfflineMutation =
 export type ShoppingListListMeta = {
   ownerId: string;
   ownerLabel: string;
+  ownerDisplayName: string;
   isSelf: boolean;
   totalItems: number;
 };
@@ -124,11 +128,34 @@ export function ShoppingListProvider({ children }: { children: ReactNode }) {
   const { data: session, status } = useSession();
   const isAuthenticated = status === "authenticated";
   const currentUserId = session?.user?.id ?? null;
-  const currentUserLabel =
-    session?.user?.name || session?.user?.email || "Your list";
+  const derivedSelfDisplayName = useMemo(() => {
+    return session?.user?.name?.trim() || session?.user?.email || "You";
+  }, [session?.user?.email, session?.user?.name]);
+  const derivedSelfLabel = useMemo(() => {
+    const customLabel = session?.user?.shoppingListLabel?.trim();
+    if (customLabel) {
+      return customLabel;
+    }
+    return session?.user?.name || session?.user?.email || "Your list";
+  }, [
+    session?.user?.email,
+    session?.user?.name,
+    session?.user?.shoppingListLabel,
+  ]);
+  const [selfListLabel, setSelfListLabel] = useState(derivedSelfLabel);
+  useEffect(() => {
+    setSelfListLabel(derivedSelfLabel);
+  }, [derivedSelfLabel]);
   const [localStore, setLocalStore] = useState<ShoppingListState>(() =>
     readStoredState()
   );
+  const [localListLabel, setLocalListLabel] = useState(() => {
+    if (typeof window === "undefined") {
+      return LOCAL_LIST_LABEL;
+    }
+    const stored = window.localStorage.getItem(LOCAL_OWNER_LABEL_STORAGE_KEY);
+    return stored?.trim() || LOCAL_LIST_LABEL;
+  });
   const [remoteLists, setRemoteLists] = useState<OwnerListState[]>([]);
   const [isRemote, setIsRemote] = useState(false);
   const [isSyncing, setIsSyncing] = useState(false);
@@ -143,12 +170,20 @@ export function ShoppingListProvider({ children }: { children: ReactNode }) {
   const hasPrimedListSignaturesRef = useRef(false);
   const offlineMutationsRef = useRef<OfflineMutation[]>([]);
 
+  useEffect(() => {
+    if (typeof window === "undefined" || isAuthenticated) {
+      return;
+    }
+    window.localStorage.setItem(LOCAL_OWNER_LABEL_STORAGE_KEY, localListLabel);
+  }, [isAuthenticated, localListLabel]);
+
   const fetchRemoteLists = useCallback(async () => {
     const response = await fetch("/api/shopping-list", { cache: "no-store" });
     const body = (await response.json().catch(() => null)) as {
       lists?: {
         ownerId: string;
         ownerLabel: string;
+        ownerDisplayName?: string | null;
         isSelf: boolean;
         state: ShoppingListState;
       }[];
@@ -160,10 +195,13 @@ export function ShoppingListProvider({ children }: { children: ReactNode }) {
     return body.lists.map((list) => ({
       ownerId: list.ownerId,
       ownerLabel: list.ownerLabel,
+      ownerDisplayName:
+        list.ownerDisplayName?.trim() ||
+        (list.isSelf ? derivedSelfDisplayName : "Shared list owner"),
       isSelf: list.isSelf,
       state: reviveStore(list.state),
     }));
-  }, []);
+  }, [derivedSelfDisplayName]);
 
   const acknowledgeExternalUpdate = useCallback(() => {
     setExternalUpdateNotice(null);
@@ -492,12 +530,16 @@ export function ShoppingListProvider({ children }: { children: ReactNode }) {
           }
           didUpdate = true;
           const ownerLabel =
-            ownerId === currentUserId ? currentUserLabel : "Shared list";
+            ownerId === currentUserId ? selfListLabel : "Shared list";
           return [
             ...current,
             {
               ownerId,
               ownerLabel,
+              ownerDisplayName:
+                ownerId === currentUserId
+                  ? derivedSelfDisplayName
+                  : "Shared list owner",
               isSelf: ownerId === currentUserId,
               state: fallbackState,
             },
@@ -507,7 +549,7 @@ export function ShoppingListProvider({ children }: { children: ReactNode }) {
       });
       return didUpdate;
     },
-    [currentUserId, currentUserLabel]
+    [currentUserId, derivedSelfDisplayName, selfListLabel]
   );
 
   const executeOfflineMutation = useCallback(
@@ -925,7 +967,8 @@ export function ShoppingListProvider({ children }: { children: ReactNode }) {
         return [
           {
             ownerId: currentUserId,
-            ownerLabel: currentUserLabel,
+            ownerLabel: selfListLabel,
+            ownerDisplayName: derivedSelfDisplayName,
             isSelf: true,
             state: {},
           },
@@ -937,18 +980,21 @@ export function ShoppingListProvider({ children }: { children: ReactNode }) {
     return [
       {
         ownerId: LOCAL_OWNER_ID,
-        ownerLabel: LOCAL_LIST_LABEL,
+        ownerLabel: localListLabel,
+        ownerDisplayName: derivedSelfDisplayName,
         isSelf: true,
         state: localStore,
       },
     ];
   }, [
     currentUserId,
-    currentUserLabel,
     isAuthenticated,
     isRemote,
+    derivedSelfDisplayName,
+    localListLabel,
     localStore,
     remoteLists,
+    selfListLabel,
   ]);
 
   useEffect(() => {
@@ -995,6 +1041,7 @@ export function ShoppingListProvider({ children }: { children: ReactNode }) {
     return resolvedLists.map((list) => ({
       ownerId: list.ownerId,
       ownerLabel: list.ownerLabel,
+      ownerDisplayName: list.ownerDisplayName,
       isSelf: list.isSelf,
       totalItems: Object.values(list.state).reduce(
         (sum, record) => sum + record.entries.length,
@@ -1015,6 +1062,69 @@ export function ShoppingListProvider({ children }: { children: ReactNode }) {
     }
   }, []);
 
+  const renameList = useCallback(
+    async (ownerId: string, nextLabel: string) => {
+      const trimmed = nextLabel.trim();
+      if (!trimmed) {
+        throw new Error("List name cannot be empty.");
+      }
+
+      if (!isAuthenticated) {
+        if (ownerId !== LOCAL_OWNER_ID) {
+          throw new Error("You can only rename lists you own.");
+        }
+        setLocalListLabel(trimmed);
+        return;
+      }
+
+      if (!currentUserId || ownerId !== currentUserId) {
+        throw new Error("You can only rename lists you own.");
+      }
+
+      if (!isClientOnline) {
+        throw new Error("Reconnect to rename your synced list.");
+      }
+
+      const response = await fetch("/api/shopping-list/label", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ label: trimmed }),
+      });
+      const payload = (await response.json().catch(() => null)) as {
+        label?: string;
+        error?: string;
+      } | null;
+
+      if (!response.ok) {
+        throw new Error(payload?.error ?? "Unable to rename list.");
+      }
+
+      const resolvedLabel = payload?.label?.trim() || trimmed;
+      setSelfListLabel(resolvedLabel);
+      setRemoteLists((current) =>
+        current.map((list) =>
+          list.ownerId === ownerId
+            ? { ...list, ownerLabel: resolvedLabel }
+            : list
+        )
+      );
+      setExternalUpdateNotice((notice) =>
+        notice && notice.ownerId === ownerId
+          ? { ...notice, ownerLabel: resolvedLabel }
+          : notice
+      );
+    },
+    [
+      currentUserId,
+      isAuthenticated,
+      isClientOnline,
+      setExternalUpdateNotice,
+      setLocalListLabel,
+      setRemoteLists,
+      setSelfListLabel,
+    ]
+  );
+
   const activeListId = activeList?.ownerId ?? selectedOwnerId ?? null;
 
   const value = useMemo(
@@ -1023,6 +1133,7 @@ export function ShoppingListProvider({ children }: { children: ReactNode }) {
       lists: listsMeta,
       selectedListId: activeListId,
       selectList,
+      renameList,
       addItems,
       removeItem,
       clearList,
@@ -1041,6 +1152,7 @@ export function ShoppingListProvider({ children }: { children: ReactNode }) {
       listsMeta,
       activeListId,
       selectList,
+      renameList,
       addItems,
       removeItem,
       clearList,

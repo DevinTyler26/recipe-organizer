@@ -30,7 +30,7 @@ export async function GET() {
 
   const ownerRecords = await prisma.user.findMany({
     where: { id: { in: ownerScope } },
-    select: { id: true, name: true, email: true },
+    select: { id: true, name: true, email: true, shoppingListLabel: true },
   });
   const ownerLookup = new Map(ownerRecords.map((record) => [record.id, record]));
 
@@ -69,10 +69,16 @@ export async function GET() {
   const lists = ownerScope.map((ownerId) => {
     const ownerRecord = ownerLookup.get(ownerId);
     const fallbackLabel = ownerId === user.id ? "Your list" : "Shared list";
-    const ownerLabel = ownerRecord?.name || ownerRecord?.email || fallbackLabel;
+    const ownerDisplayName =
+      ownerRecord?.name?.trim() ||
+      ownerRecord?.email?.trim() ||
+      (ownerId === user.id ? "You" : "Shared list owner");
+    const ownerLabel =
+      ownerRecord?.shoppingListLabel?.trim() || fallbackLabel;
     return {
       ownerId,
       ownerLabel,
+      ownerDisplayName,
       isSelf: ownerId === user.id,
       state: groupedByOwner[ownerId] ?? {},
     };
