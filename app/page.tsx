@@ -134,12 +134,29 @@ type RecipeDraftPayload = {
   shareWithOwnerId?: string | null;
   collaboratorIds?: string[];
 };
-
-type OfflineRecipeMutation = {
-  kind: "CREATE";
-  tempId: string;
-  payload: RecipeDraftPayload;
+type RecipeUpdatePayload = {
+  id: string;
+  title: string;
+  summary: string | null;
+  ingredients: string[];
+  tags: string[];
 };
+
+type OfflineRecipeMutation =
+  | {
+      kind: "CREATE";
+      tempId: string;
+      payload: RecipeDraftPayload;
+    }
+  | {
+      kind: "UPDATE";
+      targetId: string;
+      payload: RecipeUpdatePayload;
+    }
+  | {
+      kind: "DELETE";
+      targetId: string;
+    };
 
 const generateRecipeId = () => {
   if (
@@ -537,35 +554,69 @@ export default function HomePage() {
       let pending = queueSnapshot;
       for (const mutation of queueSnapshot) {
         try {
-          if (mutation.kind !== "CREATE") {
-            continue;
-          }
-          const response = await fetch("/api/recipes", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify(mutation.payload),
-          });
-          const body = (await response.json().catch(() => null)) as {
-            recipe?: Recipe;
-            error?: string;
-          } | null;
-          if (!response.ok || !body?.recipe) {
-            throw new Error(body?.error ?? "Failed to sync offline recipe");
-          }
-          const savedRecipe = normalizeRecipe(body.recipe as StoredRecipe);
-          setRecipes((current) => {
-            const index = current.findIndex(
-              (recipe) => recipe.id === mutation.tempId
-            );
-            if (index === -1) {
-              return [savedRecipe, ...current];
+          if (mutation.kind === "CREATE") {
+            const response = await fetch("/api/recipes", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify(mutation.payload),
+            });
+            const body = (await response.json().catch(() => null)) as {
+              recipe?: Recipe;
+              error?: string;
+            } | null;
+            if (!response.ok || !body?.recipe) {
+              throw new Error(body?.error ?? "Failed to sync offline recipe");
             }
-            const next = [...current];
-            next[index] = savedRecipe;
-            return next;
-          });
-          pending = pending.filter((entry) => entry.tempId !== mutation.tempId);
-          showToast(`${savedRecipe.title} synced once you were back online.`);
+            const savedRecipe = normalizeRecipe(body.recipe as StoredRecipe);
+            setRecipes((current) => {
+              const index = current.findIndex(
+                (recipe) => recipe.id === mutation.tempId
+              );
+              if (index === -1) {
+                return [savedRecipe, ...current];
+              }
+              const next = [...current];
+              next[index] = savedRecipe;
+              return next;
+            });
+            showToast(`${savedRecipe.title} synced once you were back online.`);
+          } else if (mutation.kind === "UPDATE") {
+            const response = await fetch("/api/recipes", {
+              method: "PUT",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify(mutation.payload),
+            });
+            const body = (await response.json().catch(() => null)) as {
+              recipe?: Recipe;
+              error?: string;
+            } | null;
+            if (!response.ok || !body?.recipe) {
+              throw new Error(body?.error ?? "Failed to sync offline edits");
+            }
+            const updatedRecipe = normalizeRecipe(body.recipe as StoredRecipe);
+            setRecipes((current) =>
+              current.map((existing) =>
+                existing.id === mutation.targetId ? updatedRecipe : existing
+              )
+            );
+            showToast(
+              `${updatedRecipe.title} updates synced once you were back online.`
+            );
+          } else if (mutation.kind === "DELETE") {
+            const response = await fetch("/api/recipes", {
+              method: "DELETE",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ id: mutation.targetId }),
+            });
+            const body = (await response.json().catch(() => null)) as {
+              error?: string;
+            } | null;
+            if (!response.ok) {
+              throw new Error(body?.error ?? "Failed to sync offline deletion");
+            }
+            showToast(`Recipe removed once you were back online.`, "info");
+          }
+          pending = pending.filter((entry) => entry !== mutation);
         } catch (error) {
           console.error("Failed to sync offline recipe", error);
         }
@@ -825,7 +876,93 @@ export default function HomePage() {
     setIsSaving(true);
     if (editingRecipeId) {
       const recipeIdBeingEdited = editingRecipeId;
+      const currentRecipe = recipes.find(
+        (existing) => existing.id === recipeIdBeingEdited
+      );
       if (isAuthenticated) {
+        if (!isClientOnline) {
+          if (!currentRecipe) {
+            showToast("Unable to find this recipe locally.", "error");
+            resetFormState();
+            setIsSaving(false);
+            return;
+          }
+          const offlineOwner: RecipeOwner = session?.user?.id
+            ? {
+                id: session.user.id,
+                name: session.user.name ?? null,
+                email: session.user.email ?? null,
+              }
+            : currentRecipe.updatedBy ?? currentRecipe.owner ?? null;
+          const updatedRecipe: Recipe = {
+            ...currentRecipe,
+            title: trimmedTitle,
+            summary: payload.summary,
+            ingredients,
+            tags,
+            updatedAt: new Date().toISOString(),
+            updatedBy: offlineOwner,
+            updatedById: offlineOwner?.id ?? currentRecipe.updatedById ?? null,
+          };
+          setRecipes((current) =>
+            current.map((existing) =>
+              existing.id === recipeIdBeingEdited ? updatedRecipe : existing
+            )
+          );
+          const queueSnapshot = offlineRecipeMutationsRef.current;
+          const existingCreateIndex = queueSnapshot.findIndex(
+            (entry) =>
+              entry.kind === "CREATE" && entry.tempId === recipeIdBeingEdited
+          );
+          let nextQueue: OfflineRecipeMutation[];
+          if (existingCreateIndex !== -1) {
+            nextQueue = [...queueSnapshot];
+            const existingEntry = nextQueue[existingCreateIndex];
+            if (existingEntry.kind === "CREATE") {
+              nextQueue[existingCreateIndex] = {
+                ...existingEntry,
+                payload: {
+                  ...existingEntry.payload,
+                  title: payload.title,
+                  summary: payload.summary,
+                  ingredients,
+                  tags,
+                },
+              };
+            }
+          } else {
+            const sanitizedQueue = queueSnapshot.filter(
+              (entry) =>
+                !(
+                  entry.kind === "UPDATE" &&
+                  entry.targetId === recipeIdBeingEdited
+                )
+            );
+            const offlineUpdatePayload: RecipeUpdatePayload = {
+              id: recipeIdBeingEdited,
+              title: payload.title,
+              summary: payload.summary,
+              ingredients,
+              tags,
+            };
+            nextQueue = [
+              ...sanitizedQueue,
+              {
+                kind: "UPDATE",
+                targetId: recipeIdBeingEdited,
+                payload: offlineUpdatePayload,
+              },
+            ];
+          }
+          updateOfflineRecipeQueue(nextQueue);
+          resetFormState();
+          showToast(
+            `${updatedRecipe.title} changes saved offline. We'll sync them when you're back online.`,
+            "info"
+          );
+          setIsSaving(false);
+          return;
+        }
         try {
           const response = await fetch("/api/recipes", {
             method: "PUT",
@@ -863,9 +1000,6 @@ export default function HomePage() {
         return;
       }
 
-      const currentRecipe = recipes.find(
-        (existing) => existing.id === recipeIdBeingEdited
-      );
       if (!currentRecipe) {
         showToast("Unable to find this recipe locally.", "error");
         resetFormState();
@@ -1127,6 +1261,38 @@ export default function HomePage() {
         return;
       }
 
+      if (!isClientOnline) {
+        const queueSnapshot = offlineRecipeMutationsRef.current;
+        const hadPendingCreate = queueSnapshot.some(
+          (entry) => entry.kind === "CREATE" && entry.tempId === recipe.id
+        );
+        const sanitizedQueue = queueSnapshot.filter(
+          (entry) =>
+            !(
+              (entry.kind === "CREATE" && entry.tempId === recipe.id) ||
+              ((entry.kind === "UPDATE" || entry.kind === "DELETE") &&
+                entry.targetId === recipe.id)
+            )
+        );
+        const deleteMutation: OfflineRecipeMutation = {
+          kind: "DELETE",
+          targetId: recipe.id,
+        };
+        const nextQueue = hadPendingCreate
+          ? sanitizedQueue
+          : [...sanitizedQueue, deleteMutation];
+        updateOfflineRecipeQueue(nextQueue);
+        setRecipes((current) =>
+          current.filter((existing) => existing.id !== recipe.id)
+        );
+        showToast(
+          `${recipe.title} will be deleted once you're back online.`,
+          "info"
+        );
+        setDeletingRecipeId(null);
+        return;
+      }
+
       const previousRecipes = recipes;
       setDeletingRecipeId(recipe.id);
       setRecipes((current) =>
@@ -1163,7 +1329,15 @@ export default function HomePage() {
         setDeletingRecipeId(null);
       }
     },
-    [editingRecipeId, isAuthenticated, recipes, resetFormState, showToast]
+    [
+      editingRecipeId,
+      isAuthenticated,
+      isClientOnline,
+      recipes,
+      resetFormState,
+      showToast,
+      updateOfflineRecipeQueue,
+    ]
   );
 
   const confirmDeleteRecipe = useCallback(() => {
@@ -1995,10 +2169,32 @@ function readOfflineRecipeQueue(): OfflineRecipeMutation[] {
     if (!Array.isArray(parsed)) {
       return [];
     }
-    return parsed.filter(
-      (entry): entry is OfflineRecipeMutation =>
-        typeof entry?.kind === "string" && entry.kind === "CREATE"
-    );
+    return parsed.filter((entry): entry is OfflineRecipeMutation => {
+      if (!entry || typeof entry !== "object") {
+        return false;
+      }
+      if (entry.kind === "CREATE") {
+        return (
+          typeof entry.tempId === "string" &&
+          entry.tempId.length > 0 &&
+          entry.payload !== null &&
+          typeof entry.payload === "object"
+        );
+      }
+      if (entry.kind === "UPDATE") {
+        return (
+          typeof entry.targetId === "string" &&
+          entry.targetId.length > 0 &&
+          entry.payload !== null &&
+          typeof entry.payload === "object" &&
+          typeof (entry.payload as { id?: unknown }).id === "string"
+        );
+      }
+      if (entry.kind === "DELETE") {
+        return typeof entry.targetId === "string" && entry.targetId.length > 0;
+      }
+      return false;
+    });
   } catch (error) {
     console.warn("Failed to parse offline recipe queue", error);
     return [];
