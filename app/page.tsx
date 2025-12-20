@@ -521,7 +521,11 @@ export default function HomePage() {
         const normalized = normalizeRecipeList(
           body?.recipes as StoredRecipe[] | undefined
         );
-        const pendingOrder = pendingReorderRef.current;
+        const queuedReorder = offlineRecipeMutationsRef.current.find(
+          (entry) => entry.kind === "REORDER"
+        );
+        const pendingOrder =
+          pendingReorderRef.current ?? queuedReorder?.orderedIds ?? null;
         const remoteIds = normalized.map((recipe) => recipe.id);
         let resolvedRecipes = normalized;
         if (pendingOrder && pendingOrder.length) {
@@ -530,6 +534,9 @@ export default function HomePage() {
             pendingOrder.every((id, index) => id === remoteIds[index]);
           if (ordersMatch) {
             pendingReorderRef.current = null;
+            if (!queuedReorder) {
+              resolvedRecipes = normalized;
+            }
           } else {
             const indexMap = new Map<string, number>();
             pendingOrder.forEach((id, index) => indexMap.set(id, index));
