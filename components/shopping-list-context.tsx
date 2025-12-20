@@ -27,6 +27,8 @@ import {
 const STORAGE_KEY = "recipe-organizer-shopping-list";
 const SELECTED_OWNER_STORAGE_KEY = "recipe-organizer-active-shopping-list";
 const LOCAL_OWNER_LABEL_STORAGE_KEY = "recipe-organizer-local-list-label";
+const REMOTE_LIST_CACHE_KEY = "recipe-organizer-remote-shopping-lists";
+const OFFLINE_MUTATION_CACHE_KEY = "recipe-organizer-offline-mutations";
 
 type ShoppingListContextValue = {
   items: ShoppingListItem[];
@@ -169,6 +171,32 @@ export function ShoppingListProvider({ children }: { children: ReactNode }) {
   const pendingOwnerMutationsRef = useRef<Map<string, number>>(new Map());
   const hasPrimedListSignaturesRef = useRef(false);
   const offlineMutationsRef = useRef<OfflineMutation[]>([]);
+  const offlineQueueHydratedRef = useRef(false);
+
+  const commitRemoteLists = useCallback(
+    (
+      next: OwnerListState[] | ((current: OwnerListState[]) => OwnerListState[])
+    ) => {
+      setRemoteLists((current) => {
+        const resolved =
+          typeof next === "function"
+            ? (next as (state: OwnerListState[]) => OwnerListState[])(current)
+            : next;
+        if (resolved !== current && isAuthenticated) {
+          persistRemoteListCache(resolved);
+        }
+        return resolved;
+      });
+    },
+    [isAuthenticated]
+  );
+
+  const updateOfflineQueue = useCallback((mutations: OfflineMutation[]) => {
+    offlineMutationsRef.current = mutations;
+    if (offlineQueueHydratedRef.current) {
+      persistOfflineMutationCache(mutations);
+    }
+  }, []);
 
   useEffect(() => {
     if (typeof window === "undefined" || isAuthenticated) {
@@ -253,6 +281,30 @@ export function ShoppingListProvider({ children }: { children: ReactNode }) {
     [isAuthenticated]
   );
 
+  useEffect(() => {
+    if (!isAuthenticated) {
+      offlineQueueHydratedRef.current = false;
+      updateOfflineQueue([]);
+      clearOfflineMutationCache();
+      clearRemoteListCache();
+      return;
+    }
+    const cachedLists = readRemoteListCache();
+    if (cachedLists.length) {
+      commitRemoteLists(cachedLists);
+      setIsRemote(true);
+      evaluateRemoteListChanges(cachedLists, { prime: true });
+    }
+    const cachedMutations = readOfflineMutationCache();
+    updateOfflineQueue(cachedMutations);
+    offlineQueueHydratedRef.current = true;
+  }, [
+    commitRemoteLists,
+    evaluateRemoteListChanges,
+    isAuthenticated,
+    updateOfflineQueue,
+  ]);
+
   const backgroundRefreshRemoteLists = useCallback(
     async (options?: { shouldAbort?: () => boolean }) => {
       if (!isAuthenticated || !isClientOnline) {
@@ -264,7 +316,7 @@ export function ShoppingListProvider({ children }: { children: ReactNode }) {
         if (shouldAbort?.()) {
           return;
         }
-        setRemoteLists(lists);
+        commitRemoteLists(lists);
         setIsRemote(true);
         evaluateRemoteListChanges(lists);
       } catch (error) {
@@ -274,6 +326,7 @@ export function ShoppingListProvider({ children }: { children: ReactNode }) {
       }
     },
     [
+      commitRemoteLists,
       evaluateRemoteListChanges,
       fetchRemoteLists,
       isAuthenticated,
@@ -321,14 +374,13 @@ export function ShoppingListProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     if (!isAuthenticated) {
       setIsRemote(false);
-      setRemoteLists([]);
+      commitRemoteLists([]);
       setLocalStore(readStoredState());
       setSelectedOwnerId(LOCAL_OWNER_ID);
       listSignatureRef.current.clear();
       pendingOwnerMutationsRef.current.clear();
       hasPrimedListSignaturesRef.current = false;
       setExternalUpdateNotice(null);
-      offlineMutationsRef.current = [];
       return;
     }
     if (!isClientOnline) {
@@ -340,7 +392,7 @@ export function ShoppingListProvider({ children }: { children: ReactNode }) {
     fetchRemoteLists()
       .then((lists) => {
         if (cancelled) return;
-        setRemoteLists(lists);
+        commitRemoteLists(lists);
         setIsRemote(true);
         setSelectedOwnerId((current) => {
           if (current && lists.some((list) => list.ownerId === current)) {
@@ -369,6 +421,7 @@ export function ShoppingListProvider({ children }: { children: ReactNode }) {
       cancelled = true;
     };
   }, [
+    commitRemoteLists,
     currentUserId,
     evaluateRemoteListChanges,
     fetchRemoteLists,
@@ -459,7 +512,7 @@ export function ShoppingListProvider({ children }: { children: ReactNode }) {
           throw new Error(body?.error ?? "Shopping list request failed");
         }
         const nextLists = await fetchRemoteLists();
-        setRemoteLists(nextLists);
+        commitRemoteLists(nextLists);
         setIsRemote(true);
         setSelectedOwnerId((current) => {
           if (current && nextLists.some((list) => list.ownerId === current)) {
@@ -486,6 +539,7 @@ export function ShoppingListProvider({ children }: { children: ReactNode }) {
       }
     },
     [
+      commitRemoteLists,
       currentUserId,
       evaluateRemoteListChanges,
       fetchRemoteLists,
@@ -493,9 +547,12 @@ export function ShoppingListProvider({ children }: { children: ReactNode }) {
     ]
   );
 
-  const queueOfflineMutation = useCallback((mutation: OfflineMutation) => {
-    offlineMutationsRef.current = [...offlineMutationsRef.current, mutation];
-  }, []);
+  const queueOfflineMutation = useCallback(
+    (mutation: OfflineMutation) => {
+      updateOfflineQueue([...offlineMutationsRef.current, mutation]);
+    },
+    [updateOfflineQueue]
+  );
 
   const applyOwnerStateMutation = useCallback(
     (
@@ -503,7 +560,7 @@ export function ShoppingListProvider({ children }: { children: ReactNode }) {
       mutator: (state: ShoppingListState) => ShoppingListState
     ) => {
       let didUpdate = false;
-      setRemoteLists((current) => {
+      commitRemoteLists((current) => {
         let found = false;
         let nextLists = current;
         for (let index = 0; index < current.length; index += 1) {
@@ -549,7 +606,7 @@ export function ShoppingListProvider({ children }: { children: ReactNode }) {
       });
       return didUpdate;
     },
-    [currentUserId, derivedSelfDisplayName, selfListLabel]
+    [commitRemoteLists, currentUserId, derivedSelfDisplayName, selfListLabel]
   );
 
   const executeOfflineMutation = useCallback(
@@ -630,24 +687,24 @@ export function ShoppingListProvider({ children }: { children: ReactNode }) {
       return;
     }
     const pending = [...offlineMutationsRef.current];
-    offlineMutationsRef.current = [];
+    updateOfflineQueue([]);
     for (let index = 0; index < pending.length; index += 1) {
       const mutation = pending[index];
       const result = await executeOfflineMutation(mutation);
       if (!result?.success) {
-        offlineMutationsRef.current = pending.slice(index);
+        updateOfflineQueue(pending.slice(index));
         return;
       }
     }
     await backgroundRefreshRemoteLists();
-  }, [backgroundRefreshRemoteLists, executeOfflineMutation]);
+  }, [
+    backgroundRefreshRemoteLists,
+    executeOfflineMutation,
+    updateOfflineQueue,
+  ]);
 
   useEffect(() => {
-    if (!isAuthenticated) {
-      offlineMutationsRef.current = [];
-      return;
-    }
-    if (!isClientOnline) {
+    if (!isAuthenticated || !isClientOnline) {
       return;
     }
     void flushOfflineMutations();
@@ -837,7 +894,7 @@ export function ShoppingListProvider({ children }: { children: ReactNode }) {
         }
       }
 
-      setRemoteLists((current) => {
+      commitRemoteLists((current) => {
         let changed = false;
         const next = current.map((list) => {
           if (list.ownerId !== targetOwnerId) {
@@ -868,6 +925,7 @@ export function ShoppingListProvider({ children }: { children: ReactNode }) {
     },
     [
       applyOwnerStateMutation,
+      commitRemoteLists,
       isAuthenticated,
       isClientOnline,
       queueOfflineMutation,
@@ -911,7 +969,7 @@ export function ShoppingListProvider({ children }: { children: ReactNode }) {
       }
 
       const previousLists = remoteLists;
-      setRemoteLists((current) =>
+      commitRemoteLists((current) =>
         current.map((list) => {
           if (list.ownerId !== targetOwnerId) {
             return list;
@@ -943,12 +1001,13 @@ export function ShoppingListProvider({ children }: { children: ReactNode }) {
       );
 
       if (!result.success) {
-        setRemoteLists(previousLists);
+        commitRemoteLists(previousLists);
         throw result.error;
       }
     },
     [
       applyOwnerStateMutation,
+      commitRemoteLists,
       isAuthenticated,
       isClientOnline,
       queueOfflineMutation,
@@ -1101,7 +1160,7 @@ export function ShoppingListProvider({ children }: { children: ReactNode }) {
 
       const resolvedLabel = payload?.label?.trim() || trimmed;
       setSelfListLabel(resolvedLabel);
-      setRemoteLists((current) =>
+      commitRemoteLists((current) =>
         current.map((list) =>
           list.ownerId === ownerId
             ? { ...list, ownerLabel: resolvedLabel }
@@ -1115,12 +1174,12 @@ export function ShoppingListProvider({ children }: { children: ReactNode }) {
       );
     },
     [
+      commitRemoteLists,
       currentUserId,
       isAuthenticated,
       isClientOnline,
       setExternalUpdateNotice,
       setLocalListLabel,
-      setRemoteLists,
       setSelfListLabel,
     ]
   );
@@ -1465,4 +1524,238 @@ function reviveEntry(value: unknown): QuantityEntry | null {
         ? entry.sourceRecipeTitle
         : undefined,
   };
+}
+
+function readRemoteListCache(): OwnerListState[] {
+  if (typeof window === "undefined") {
+    return [];
+  }
+  const raw = window.localStorage.getItem(REMOTE_LIST_CACHE_KEY);
+  if (!raw) {
+    return [];
+  }
+  try {
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) {
+      return [];
+    }
+    return parsed
+      .map((entry) => hydrateCachedOwnerList(entry))
+      .filter((entry): entry is OwnerListState => Boolean(entry));
+  } catch (error) {
+    console.warn("Failed to parse cached shopping lists", error);
+    return [];
+  }
+}
+
+function hydrateCachedOwnerList(value: unknown): OwnerListState | null {
+  if (!value || typeof value !== "object") {
+    return null;
+  }
+  const record = value as {
+    ownerId?: unknown;
+    ownerLabel?: unknown;
+    ownerDisplayName?: unknown;
+    isSelf?: unknown;
+    state?: unknown;
+  };
+  const ownerId =
+    typeof record.ownerId === "string" && record.ownerId.trim().length
+      ? record.ownerId
+      : null;
+  if (!ownerId) {
+    return null;
+  }
+  const ownerLabel =
+    typeof record.ownerLabel === "string" && record.ownerLabel.trim().length
+      ? record.ownerLabel
+      : "Shared list";
+  const ownerDisplayName =
+    typeof record.ownerDisplayName === "string" &&
+    record.ownerDisplayName.trim().length
+      ? record.ownerDisplayName
+      : ownerLabel;
+  const revivedState = reviveStore(record.state);
+  return {
+    ownerId,
+    ownerLabel,
+    ownerDisplayName,
+    isSelf: record.isSelf === true,
+    state: revivedState,
+  };
+}
+
+function persistRemoteListCache(lists: OwnerListState[]) {
+  if (typeof window === "undefined") {
+    return;
+  }
+  try {
+    if (!lists.length) {
+      window.localStorage.removeItem(REMOTE_LIST_CACHE_KEY);
+      return;
+    }
+    const payload = lists.map((list) => ({
+      ownerId: list.ownerId,
+      ownerLabel: list.ownerLabel,
+      ownerDisplayName: list.ownerDisplayName,
+      isSelf: list.isSelf,
+      state: list.state,
+    }));
+    window.localStorage.setItem(REMOTE_LIST_CACHE_KEY, JSON.stringify(payload));
+  } catch (error) {
+    console.warn("Failed to cache shopping lists", error);
+  }
+}
+
+function clearRemoteListCache() {
+  if (typeof window === "undefined") {
+    return;
+  }
+  window.localStorage.removeItem(REMOTE_LIST_CACHE_KEY);
+}
+
+function readOfflineMutationCache(): OfflineMutation[] {
+  if (typeof window === "undefined") {
+    return [];
+  }
+  const raw = window.localStorage.getItem(OFFLINE_MUTATION_CACHE_KEY);
+  if (!raw) {
+    return [];
+  }
+  try {
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) {
+      return [];
+    }
+    return parsed
+      .map((entry) => hydrateOfflineMutation(entry))
+      .filter((entry): entry is OfflineMutation => Boolean(entry));
+  } catch (error) {
+    console.warn("Failed to parse offline shopping list queue", error);
+    return [];
+  }
+}
+
+function hydrateOfflineMutation(value: unknown): OfflineMutation | null {
+  if (!value || typeof value !== "object") {
+    return null;
+  }
+  const record = value as Record<string, unknown>;
+  const kind =
+    typeof record.kind === "string" && record.kind.length ? record.kind : null;
+  if (!kind) {
+    return null;
+  }
+  const ownerId =
+    typeof record.ownerId === "string" && record.ownerId.trim().length
+      ? record.ownerId
+      : null;
+  if (!ownerId) {
+    return null;
+  }
+  switch (kind) {
+    case "ADD_ITEMS": {
+      if (!Array.isArray(record.ingredients)) {
+        return null;
+      }
+      const ingredients = record.ingredients
+        .map((entry) => hydrateOfflineIngredient(entry))
+        .filter((entry): entry is IncomingIngredient => Boolean(entry));
+      if (!ingredients.length) {
+        return null;
+      }
+      return { kind: "ADD_ITEMS", ownerId, ingredients };
+    }
+    case "REMOVE_ITEM": {
+      const label =
+        typeof record.label === "string" && record.label.length
+          ? record.label
+          : null;
+      if (!label) {
+        return null;
+      }
+      return { kind: "REMOVE_ITEM", ownerId, label };
+    }
+    case "CLEAR_LIST":
+      return { kind: "CLEAR_LIST", ownerId };
+    case "REORDER_ITEMS": {
+      if (!Array.isArray(record.order)) {
+        return null;
+      }
+      const order = record.order
+        .map((entry) => (typeof entry === "string" ? entry : null))
+        .filter((entry): entry is string => Boolean(entry));
+      if (!order.length) {
+        return null;
+      }
+      return { kind: "REORDER_ITEMS", ownerId, order };
+    }
+    case "UPDATE_QUANTITY": {
+      const label =
+        typeof record.label === "string" && record.label.length
+          ? record.label
+          : null;
+      const quantity =
+        typeof record.quantity === "string" ? record.quantity : null;
+      if (!label || quantity === null) {
+        return null;
+      }
+      return { kind: "UPDATE_QUANTITY", ownerId, label, quantity };
+    }
+    default:
+      return null;
+  }
+}
+
+function hydrateOfflineIngredient(value: unknown): IncomingIngredient | null {
+  if (!value || typeof value !== "object") {
+    return null;
+  }
+  const record = value as {
+    value?: unknown;
+    recipeId?: unknown;
+    recipeTitle?: unknown;
+  };
+  const normalizedValue =
+    typeof record.value === "string" && record.value.trim().length
+      ? record.value
+      : null;
+  if (!normalizedValue) {
+    return null;
+  }
+  const ingredient: IncomingIngredient = {
+    value: normalizedValue,
+  };
+  if (typeof record.recipeId === "string" && record.recipeId.length) {
+    ingredient.recipeId = record.recipeId;
+  }
+  if (typeof record.recipeTitle === "string" && record.recipeTitle.length) {
+    ingredient.recipeTitle = record.recipeTitle;
+  }
+  return ingredient;
+}
+
+function persistOfflineMutationCache(mutations: OfflineMutation[]) {
+  if (typeof window === "undefined") {
+    return;
+  }
+  try {
+    if (!mutations.length) {
+      window.localStorage.removeItem(OFFLINE_MUTATION_CACHE_KEY);
+      return;
+    }
+    window.localStorage.setItem(
+      OFFLINE_MUTATION_CACHE_KEY,
+      JSON.stringify(mutations)
+    );
+  } catch (error) {
+    console.warn("Failed to cache offline shopping list changes", error);
+  }
+}
+
+function clearOfflineMutationCache() {
+  if (typeof window === "undefined") {
+    return;
+  }
+  window.localStorage.removeItem(OFFLINE_MUTATION_CACHE_KEY);
 }
