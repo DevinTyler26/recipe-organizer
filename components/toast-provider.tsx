@@ -16,10 +16,21 @@ type ToastMessage = {
   id: number;
   message: string;
   tone: ToastTone;
+  onClick?: () => void;
+  actionLabel?: string;
 };
 
 type ToastContextValue = {
-  showToast: (message: string, tone?: ToastTone) => void;
+  showToast: (
+    message: string,
+    tone?: ToastTone,
+    options?: ToastOptions
+  ) => void;
+};
+
+type ToastOptions = {
+  onClick?: () => void;
+  actionLabel?: string;
 };
 
 const toneStyles: Record<ToastTone, string> = {
@@ -67,9 +78,18 @@ export function ToastProvider({ children }: { children: ReactNode }) {
   });
 
   const showToast = useCallback(
-    (message: string, tone: ToastTone = "success") => {
+    (message: string, tone: ToastTone = "success", options?: ToastOptions) => {
       const id = Date.now() + Math.random();
-      dispatch({ type: "ENQUEUE", toast: { id, message, tone } });
+      dispatch({
+        type: "ENQUEUE",
+        toast: {
+          id,
+          message,
+          tone,
+          onClick: options?.onClick,
+          actionLabel: options?.actionLabel,
+        },
+      });
     },
     []
   );
@@ -99,12 +119,34 @@ export function ToastProvider({ children }: { children: ReactNode }) {
           <div
             className={`pointer-events-auto flex max-w-sm items-center gap-3 rounded-2xl border px-4 py-3 text-sm font-semibold shadow-xl transition ${
               toneStyles[active.tone]
-            }`}
+            } ${active.onClick ? "cursor-pointer" : ""}`}
+            onClick={() => {
+              if (active.onClick) {
+                active.onClick();
+                dismissActiveToast();
+              }
+            }}
           >
             <span className="flex-1 leading-snug">{active.message}</span>
+            {active.onClick && (
+              <button
+                type="button"
+                onClick={(event) => {
+                  event.stopPropagation();
+                  active.onClick?.();
+                  dismissActiveToast();
+                }}
+                className="rounded-full border border-slate-300 px-3 py-1 text-[10px] font-semibold uppercase tracking-[0.3em] text-slate-600 transition hover:border-slate-400 hover:text-slate-900"
+              >
+                {active.actionLabel?.toUpperCase() ?? "OPEN"}
+              </button>
+            )}
             <button
               type="button"
-              onClick={dismissActiveToast}
+              onClick={(event) => {
+                event.stopPropagation();
+                dismissActiveToast();
+              }}
               className="text-[10px] font-semibold uppercase tracking-[0.3em] text-slate-500 transition hover:text-slate-700"
             >
               Dismiss

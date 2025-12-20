@@ -10,6 +10,7 @@ import {
   type FormEvent,
 } from "react";
 import { useSession } from "next-auth/react";
+import { useRouter } from "next/navigation";
 import { useShoppingList } from "@/components/shopping-list-context";
 import { useCollaborationUI } from "@/components/collaboration-ui-context";
 import { AppNav } from "@/components/app-nav";
@@ -310,6 +311,7 @@ export default function HomePage() {
   const { data: session, status } = useSession();
   const isAuthenticated = status === "authenticated";
   const { showToast } = useToast();
+  const router = useRouter();
   const {
     collaborationRoster,
     refreshCollaborations,
@@ -1272,7 +1274,14 @@ export default function HomePage() {
         ? "your shopping list"
         : `${activeShoppingList.ownerLabel}'s list`
       : "your shopping list";
-    showToast(`${recipe.title} ingredients now live in ${destinationLabel}.`);
+    showToast(
+      `${recipe.title} ingredients now live in ${destinationLabel}.`,
+      "success",
+      {
+        onClick: () => router.push("/shopping-list"),
+        actionLabel: "View list",
+      }
+    );
   };
 
   const handleToggleFavorite = async (recipe: Recipe) => {

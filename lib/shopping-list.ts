@@ -11,6 +11,7 @@ export type ShoppingListRecord = {
   label: string;
   entries: QuantityEntry[];
   order: number;
+  crossedOffAt?: number | null;
 };
 
 export type ShoppingListState = Record<string, ShoppingListRecord>;
@@ -26,6 +27,7 @@ export type ShoppingListItem = {
   ownerId: string;
   ownerLabel: string;
   isSelf: boolean;
+  crossedOffAt?: number | null;
 };
 
 export type IncomingIngredient = {
