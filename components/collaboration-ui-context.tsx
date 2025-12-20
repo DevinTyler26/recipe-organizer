@@ -46,7 +46,7 @@ const CollaborationUIContext = createContext<
 >(undefined);
 
 export function CollaborationUIProvider({ children }: { children: ReactNode }) {
-  const { data: session, status } = useSession();
+  const { status } = useSession();
   const isAuthenticated = status === "authenticated";
   const { showToast } = useToast();
   const [collaborationRoster, setCollaborationRoster] =

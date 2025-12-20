@@ -147,6 +147,22 @@ const parseIngredients = (value: string) =>
     .map((entry) => entry.trim())
     .filter(Boolean);
 
+const titleCaseIngredient = (value: string) =>
+  value
+    .split(/\s+/)
+    .map((segment) =>
+      segment
+        .split("-")
+        .map((part) =>
+          part
+            ? part.charAt(0).toUpperCase() + part.slice(1).toLowerCase()
+            : part
+        )
+        .join("-")
+    )
+    .join(" ")
+    .trim();
+
 const dedupeTags = (entries: string[]) => {
   const seen = new Set<string>();
   const result: string[] = [];
@@ -245,17 +261,15 @@ const summarizeCollaborators = (collaborators: CollaboratorSummary[]) => {
 export default function HomePage() {
   const {
     addItems,
-    totalItems,
     lists,
     selectedListId,
-    selectList,
     externalUpdateNotice,
     acknowledgeExternalUpdate,
     refreshCollaborativeLists,
+    hasLoadedStoredSelection,
   } = useShoppingList();
   const { data: session, status } = useSession();
   const isAuthenticated = status === "authenticated";
-  const isSessionLoading = status === "loading";
   const { showToast } = useToast();
   const {
     collaborationRoster,
@@ -289,12 +303,9 @@ export default function HomePage() {
   );
   const [sortPreferenceLoaded, setSortPreferenceLoaded] = useState(false);
   const [draggingRecipeId, setDraggingRecipeId] = useState<string | null>(null);
-  const [hasHydrated, setHasHydrated] = useState(false);
   const recipeUpdateLedgerRef = useRef<Map<string, string>>(new Map());
   const hasPrimedRecipeLedgerRef = useRef(false);
   const currentUserId = session?.user?.id ?? null;
-  const accountLabel = session?.user?.name || session?.user?.email || "Account";
-  const isAdmin = Boolean(session?.user?.isAdmin);
   const orderedRecipes = useMemo(
     () => [...recipes].sort((a, b) => a.order - b.order),
     [recipes]
@@ -329,23 +340,32 @@ export default function HomePage() {
   }, [collaborationRoster]);
   const shoppingListCollaborators = useMemo(() => {
     if (
+      !hasLoadedStoredSelection ||
       !collaborationRoster?.shoppingList ||
       collaborationRoster.shoppingList.ownerId !== currentUserId
     ) {
       return [];
     }
     return collaborationRoster.shoppingList.collaborators;
-  }, [collaborationRoster, currentUserId]);
+  }, [collaborationRoster, currentUserId, hasLoadedStoredSelection]);
   const activeListCollaborators = useMemo(() => {
-    return activeShoppingList?.isSelf ? shoppingListCollaborators : [];
-  }, [activeShoppingList?.isSelf, shoppingListCollaborators]);
+    if (!hasLoadedStoredSelection || !activeShoppingList?.isSelf) {
+      return [];
+    }
+    return shoppingListCollaborators;
+  }, [
+    activeShoppingList?.isSelf,
+    shoppingListCollaborators,
+    hasLoadedStoredSelection,
+  ]);
   const activeListCollaboratorSummary = useMemo(() => {
     return summarizeCollaborators(activeListCollaborators);
   }, [activeListCollaborators]);
   const collaboratorSummaryDisplay =
     activeListCollaboratorSummary || "your collaborators";
   const showShareCollaboratorToggle = Boolean(
-    isAuthenticated &&
+    hasLoadedStoredSelection &&
+      isAuthenticated &&
       activeShoppingList?.isSelf &&
       activeListCollaborators.length > 0
   );
@@ -467,10 +487,6 @@ export default function HomePage() {
   const resetFormState = useCallback(() => {
     setForm(emptyForm);
     setEditingRecipeId(null);
-  }, []);
-
-  useEffect(() => {
-    setHasHydrated(true);
   }, []);
 
   useEffect(() => {
@@ -1000,27 +1016,32 @@ export default function HomePage() {
     };
   }, [actionsMenuRecipeId, handleEditRecipe, recipes, requestDeleteRecipe]);
 
-  const favoritesOnly = orderedRecipes.filter((recipe) => recipe.isFavorite);
+  const favoritesOnly = useMemo(
+    () => orderedRecipes.filter((recipe) => recipe.isFavorite),
+    [orderedRecipes]
+  );
   const favoriteCount = favoritesOnly.length;
-  const baseLibrary =
-    libraryFilter === "favorites" ? favoritesOnly : orderedRecipes;
+  const baseLibrary = useMemo(
+    () => (libraryFilter === "favorites" ? favoritesOnly : orderedRecipes),
+    [favoritesOnly, libraryFilter, orderedRecipes]
+  );
   const favoritesViewEmpty =
     libraryFilter === "favorites" && favoriteCount === 0;
   const effectiveSortMode = favoritesViewEmpty ? "default" : sortMode;
-  const displayedRecipes: Recipe[] =
-    libraryFilter === "favorites" || effectiveSortMode === "default"
-      ? baseLibrary
-      : [
-          ...baseLibrary.filter((recipe) => recipe.isFavorite),
-          ...baseLibrary.filter((recipe) => !recipe.isFavorite),
-        ];
+  const displayedRecipes = useMemo<Recipe[]>(() => {
+    if (libraryFilter === "favorites" || effectiveSortMode === "default") {
+      return baseLibrary;
+    }
+    const favoriteFirst = baseLibrary.filter((recipe) => recipe.isFavorite);
+    const nonFavorites = baseLibrary.filter((recipe) => !recipe.isFavorite);
+    return [...favoriteFirst, ...nonFavorites];
+  }, [baseLibrary, effectiveSortMode, libraryFilter]);
   const showRecipeSkeletons = isAuthenticated && !recipesLoaded;
   const librarySummary = showRecipeSkeletons
     ? "Loading recipes…"
     : libraryFilter === "favorites"
     ? `${favoriteCount} favorite${favoriteCount === 1 ? "" : "s"}`
     : `${orderedRecipes.length} saved`;
-  const shoppingListTotal = hasHydrated ? totalItems : 0;
   const canDragReorder =
     effectiveSortMode === "default" && displayedRecipes.length > 1;
 
@@ -1241,7 +1262,8 @@ export default function HomePage() {
                       Share with {collaboratorSummaryDisplay}
                     </span>
                     <p className="mt-1 text-xs text-slate-500">
-                      We'll add them as recipe collaborators automatically.
+                      We&rsquo;ll add them as recipe collaborators
+                      automatically.
                     </p>
                   </span>
                 </label>
@@ -1617,7 +1639,7 @@ export default function HomePage() {
                             key={`${recipe.id}-ingredient-${index}`}
                             className="rounded-full bg-white/70 px-3 py-1 text-slate-600 shadow-inner shadow-white/70"
                           >
-                            {ingredient}
+                            {titleCaseIngredient(ingredient)}
                           </li>
                         ))}
                       </ul>
