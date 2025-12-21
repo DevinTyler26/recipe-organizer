@@ -143,7 +143,7 @@ const getLowestOrderValue = (state: ShoppingListState) => {
 const LOCAL_OWNER_ID = "local";
 const LOCAL_LIST_LABEL = "This device";
 const REMOTE_SYNC_INTERVAL_MS = 12_000;
-const MUTATION_NOTICE_GRACE_MS = 2_000;
+const MUTATION_NOTICE_GRACE_MS = 10_000;
 
 export function ShoppingListProvider({ children }: { children: ReactNode }) {
   const { data: session, status } = useSession();
