@@ -437,16 +437,8 @@ export default function ShoppingListPage() {
     (item: ShoppingListItem, nextCrossed: boolean) => {
       const ownerId = item.ownerId;
       setCrossedOff(item.storageKey, nextCrossed, ownerId);
-      showToast(
-        `${item.label} ${nextCrossed ? "checked off" : "restored"}`,
-        nextCrossed ? "success" : "info",
-        {
-          actionLabel: "Undo",
-          onClick: () => setCrossedOff(item.storageKey, !nextCrossed, ownerId),
-        }
-      );
     },
-    [setCrossedOff, showToast]
+    [setCrossedOff]
   );
 
   const handleDeleteItem = useCallback(
