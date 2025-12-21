@@ -188,7 +188,6 @@ export function ShoppingListProvider({ children }: { children: ReactNode }) {
     useState<ExternalListUpdateNotice | null>(null);
   const listSignatureRef = useRef<Map<string, string>>(new Map());
   const pendingOwnerMutationsRef = useRef<Map<string, number>>(new Map());
-  const ownerPendingCountRef = useRef<Map<string, number>>(new Map());
   const recentMutationRef = useRef<Map<string, number>>(new Map());
   const hasPrimedListSignaturesRef = useRef(false);
   const offlineMutationsRef = useRef<OfflineMutation[]>([]);
@@ -545,9 +544,6 @@ export function ShoppingListProvider({ children }: { children: ReactNode }) {
         } as const;
       }
       if (ownerScope) {
-        const nextCount =
-          (ownerPendingCountRef.current.get(ownerScope) ?? 0) + 1;
-        ownerPendingCountRef.current.set(ownerScope, nextCount);
         pendingOwnerMutationsRef.current.set(ownerScope, Date.now());
       }
       setIsSyncing(true);
@@ -559,22 +555,7 @@ export function ShoppingListProvider({ children }: { children: ReactNode }) {
           } | null;
           throw new Error(body?.error ?? "Shopping list request failed");
         }
-        const pendingCount = ownerScope
-          ? ownerPendingCountRef.current.get(ownerScope) ?? 0
-          : 0;
-        const shouldCommit = !ownerScope || pendingCount === 1;
-        if (shouldCommit) {
-          const nextLists = await fetchRemoteLists();
-          commitRemoteLists(nextLists);
-          setIsRemote(true);
-          setSelectedOwnerId((current) => {
-            if (current && nextLists.some((list) => list.ownerId === current)) {
-              return current;
-            }
-            return nextLists[0]?.ownerId ?? currentUserId ?? current;
-          });
-          evaluateRemoteListChanges(nextLists);
-        }
+        void backgroundRefreshRemoteLists();
         if (ownerScope) {
           recordRecentMutation(ownerScope);
         }
@@ -590,27 +571,12 @@ export function ShoppingListProvider({ children }: { children: ReactNode }) {
         } as const;
       } finally {
         if (ownerScope) {
-          const remaining =
-            (ownerPendingCountRef.current.get(ownerScope) ?? 1) - 1;
-          if (remaining <= 0) {
-            ownerPendingCountRef.current.delete(ownerScope);
-          } else {
-            ownerPendingCountRef.current.set(ownerScope, remaining);
-          }
           pendingOwnerMutationsRef.current.delete(ownerScope);
         }
         setIsSyncing(false);
       }
     },
-    [
-      commitRemoteLists,
-      currentUserId,
-      evaluateRemoteListChanges,
-      fetchRemoteLists,
-      isAuthenticated,
-      ownerPendingCountRef,
-      recordRecentMutation,
-    ]
+    [backgroundRefreshRemoteLists, isAuthenticated, recordRecentMutation]
   );
 
   const queueOfflineMutation = useCallback(
