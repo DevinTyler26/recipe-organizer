@@ -147,9 +147,9 @@ export function ToastProvider({ children }: { children: ReactNode }) {
                 event.stopPropagation();
                 dismissActiveToast();
               }}
-              className="text-[10px] font-semibold uppercase tracking-[0.3em] text-slate-500 transition hover:text-slate-700"
+              className="rounded-full border border-slate-300 p-1 text-xs font-semibold text-slate-500 transition hover:border-slate-400 hover:text-slate-700"
             >
-              Dismiss
+              X
             </button>
           </div>
         )}
