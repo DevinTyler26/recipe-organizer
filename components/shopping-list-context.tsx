@@ -178,6 +178,7 @@ export function ShoppingListProvider({ children }: { children: ReactNode }) {
     return stored?.trim() || LOCAL_LIST_LABEL;
   });
   const [remoteLists, setRemoteLists] = useState<OwnerListState[]>([]);
+  const remoteListsRef = useRef<OwnerListState[]>([]);
   const [isRemote, setIsRemote] = useState(false);
   const [isSyncing, setIsSyncing] = useState(false);
   const [selectedOwnerId, setSelectedOwnerId] = useState<string | null>(null);
@@ -211,12 +212,49 @@ export function ShoppingListProvider({ children }: { children: ReactNode }) {
     [isAuthenticated]
   );
 
+  useEffect(() => {
+    remoteListsRef.current = remoteLists;
+  }, [remoteLists]);
+
   const updateOfflineQueue = useCallback((mutations: OfflineMutation[]) => {
     offlineMutationsRef.current = mutations;
     if (offlineQueueHydratedRef.current) {
       persistOfflineMutationCache(mutations);
     }
   }, []);
+
+  const mergeFetchedRemoteLists = useCallback(
+    (fetchedLists: OwnerListState[], fetchedAt: number) => {
+      const current = remoteListsRef.current;
+      if (!current.length) {
+        return fetchedLists;
+      }
+      const currentLookup = new Map(
+        current.map((list) => [list.ownerId, list])
+      );
+      let changed = false;
+      const merged = fetchedLists.map((list) => {
+        const lastMutation = recentMutationRef.current.get(list.ownerId);
+        if (lastMutation && lastMutation > fetchedAt) {
+          const preserved = currentLookup.get(list.ownerId);
+          if (preserved) {
+            changed = true;
+            return preserved;
+          }
+        }
+        const previous = currentLookup.get(list.ownerId);
+        if (!previous || previous.state !== list.state) {
+          changed = true;
+        }
+        return list;
+      });
+      if (merged.length !== current.length) {
+        changed = true;
+      }
+      return changed ? merged : current;
+    },
+    [recentMutationRef, remoteListsRef]
+  );
 
   useEffect(() => {
     if (typeof window === "undefined" || isAuthenticated) {
@@ -356,13 +394,15 @@ export function ShoppingListProvider({ children }: { children: ReactNode }) {
       }
       const shouldAbort = options?.shouldAbort;
       try {
+        const fetchStartedAt = Date.now();
         const lists = await fetchRemoteLists();
         if (shouldAbort?.()) {
           return;
         }
-        commitRemoteLists(lists);
+        const merged = mergeFetchedRemoteLists(lists, fetchStartedAt);
+        commitRemoteLists(merged);
         setIsRemote(true);
-        evaluateRemoteListChanges(lists);
+        evaluateRemoteListChanges(merged);
       } catch (error) {
         if (!shouldAbort?.()) {
           console.error("Failed to refresh shopping lists", error);
@@ -373,6 +413,7 @@ export function ShoppingListProvider({ children }: { children: ReactNode }) {
       commitRemoteLists,
       evaluateRemoteListChanges,
       fetchRemoteLists,
+      mergeFetchedRemoteLists,
       isAuthenticated,
       isClientOnline,
     ]
@@ -433,21 +474,23 @@ export function ShoppingListProvider({ children }: { children: ReactNode }) {
 
     let cancelled = false;
     setIsSyncing(true);
+    const fetchStartedAt = Date.now();
     fetchRemoteLists()
       .then((lists) => {
         if (cancelled) return;
-        commitRemoteLists(lists);
+        const merged = mergeFetchedRemoteLists(lists, fetchStartedAt);
+        commitRemoteLists(merged);
         setIsRemote(true);
         setSelectedOwnerId((current) => {
-          if (current && lists.some((list) => list.ownerId === current)) {
+          if (current && merged.some((list) => list.ownerId === current)) {
             return current;
           }
           if (!hasLoadedStoredSelection) {
             return current;
           }
-          return lists[0]?.ownerId ?? currentUserId ?? current;
+          return merged[0]?.ownerId ?? currentUserId ?? current;
         });
-        evaluateRemoteListChanges(lists, { prime: true });
+        evaluateRemoteListChanges(merged, { prime: true });
       })
       .catch((error) => {
         if (!cancelled) {
@@ -469,6 +512,7 @@ export function ShoppingListProvider({ children }: { children: ReactNode }) {
     currentUserId,
     evaluateRemoteListChanges,
     fetchRemoteLists,
+    mergeFetchedRemoteLists,
     hasLoadedStoredSelection,
     isAuthenticated,
     isClientOnline,
