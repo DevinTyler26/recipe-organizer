@@ -143,6 +143,7 @@ const getLowestOrderValue = (state: ShoppingListState) => {
 const LOCAL_OWNER_ID = "local";
 const LOCAL_LIST_LABEL = "This device";
 const REMOTE_SYNC_INTERVAL_MS = 12_000;
+const MUTATION_NOTICE_GRACE_MS = 2_000;
 
 export function ShoppingListProvider({ children }: { children: ReactNode }) {
   const { data: session, status } = useSession();
@@ -187,6 +188,7 @@ export function ShoppingListProvider({ children }: { children: ReactNode }) {
     useState<ExternalListUpdateNotice | null>(null);
   const listSignatureRef = useRef<Map<string, string>>(new Map());
   const pendingOwnerMutationsRef = useRef<Map<string, number>>(new Map());
+  const recentMutationRef = useRef<Map<string, number>>(new Map());
   const hasPrimedListSignaturesRef = useRef(false);
   const offlineMutationsRef = useRef<OfflineMutation[]>([]);
   const offlineQueueHydratedRef = useRef(false);
@@ -253,6 +255,25 @@ export function ShoppingListProvider({ children }: { children: ReactNode }) {
     setExternalUpdateNotice(null);
   }, []);
 
+  const recordRecentMutation = useCallback((ownerId?: string | null) => {
+    if (!ownerId) {
+      return;
+    }
+    recentMutationRef.current.set(ownerId, Date.now());
+  }, []);
+
+  const hasRecentMutation = useCallback((ownerId: string) => {
+    const timestamp = recentMutationRef.current.get(ownerId);
+    if (!timestamp) {
+      return false;
+    }
+    if (Date.now() - timestamp > MUTATION_NOTICE_GRACE_MS) {
+      recentMutationRef.current.delete(ownerId);
+      return false;
+    }
+    return true;
+  }, []);
+
   const evaluateRemoteListChanges = useCallback(
     (lists: OwnerListState[], options?: { prime?: boolean }) => {
       if (!isAuthenticated) {
@@ -275,7 +296,7 @@ export function ShoppingListProvider({ children }: { children: ReactNode }) {
         if (prime || !previous || previous === signature) {
           return;
         }
-        if (pending.has(list.ownerId)) {
+        if (pending.has(list.ownerId) || hasRecentMutation(list.ownerId)) {
           return;
         }
         setExternalUpdateNotice({
@@ -296,7 +317,7 @@ export function ShoppingListProvider({ children }: { children: ReactNode }) {
         hasPrimedListSignaturesRef.current = true;
       }
     },
-    [isAuthenticated]
+    [hasRecentMutation, isAuthenticated]
   );
 
   useEffect(() => {
@@ -544,6 +565,9 @@ export function ShoppingListProvider({ children }: { children: ReactNode }) {
           return nextLists[0]?.ownerId ?? currentUserId ?? current;
         });
         evaluateRemoteListChanges(nextLists);
+        if (ownerScope) {
+          recordRecentMutation(ownerScope);
+        }
         return { success: true } as const;
       } catch (error) {
         console.error("Shopping list sync failed", error);
@@ -567,6 +591,7 @@ export function ShoppingListProvider({ children }: { children: ReactNode }) {
       evaluateRemoteListChanges,
       fetchRemoteLists,
       isAuthenticated,
+      recordRecentMutation,
     ]
   );
 
