@@ -144,6 +144,8 @@ const LOCAL_OWNER_ID = "local";
 const LOCAL_LIST_LABEL = "This device";
 const REMOTE_SYNC_INTERVAL_MS = 12_000;
 const MUTATION_NOTICE_GRACE_MS = 10_000;
+const COLLAB_UPDATE_DELAY_MS = 5_000;
+const COLLAB_UPDATE_JITTER_MS = 2_000;
 
 export function ShoppingListProvider({ children }: { children: ReactNode }) {
   const { data: session, status } = useSession();
@@ -193,6 +195,8 @@ export function ShoppingListProvider({ children }: { children: ReactNode }) {
   const hasPrimedListSignaturesRef = useRef(false);
   const offlineMutationsRef = useRef<OfflineMutation[]>([]);
   const offlineQueueHydratedRef = useRef(false);
+  const remoteRefreshTimerRef = useRef<number | null>(null);
+  const remoteRefreshAbortRef = useRef<(() => boolean) | null>(null);
 
   const commitRemoteLists = useCallback(
     (
@@ -419,6 +423,70 @@ export function ShoppingListProvider({ children }: { children: ReactNode }) {
     ]
   );
 
+  const clearScheduledRemoteRefresh = useCallback(() => {
+    if (
+      remoteRefreshTimerRef.current !== null &&
+      typeof window !== "undefined"
+    ) {
+      window.clearTimeout(remoteRefreshTimerRef.current);
+    }
+    remoteRefreshTimerRef.current = null;
+    remoteRefreshAbortRef.current = null;
+  }, []);
+
+  const scheduleRemoteRefresh = useCallback(
+    (options?: { immediate?: boolean; shouldAbort?: () => boolean }) => {
+      if (!isAuthenticated || !isClientOnline) {
+        return;
+      }
+      if (typeof window === "undefined" || options?.immediate) {
+        if (options?.shouldAbort && options.shouldAbort()) {
+          return;
+        }
+        clearScheduledRemoteRefresh();
+        void backgroundRefreshRemoteLists();
+        return;
+      }
+      if (remoteRefreshTimerRef.current !== null) {
+        remoteRefreshAbortRef.current = options?.shouldAbort ?? null;
+        return;
+      }
+      const jitterRange = Math.min(
+        COLLAB_UPDATE_JITTER_MS,
+        COLLAB_UPDATE_DELAY_MS
+      );
+      const jitter = jitterRange
+        ? Math.round((Math.random() * 2 - 1) * jitterRange)
+        : 0;
+      const delay = Math.max(1_000, COLLAB_UPDATE_DELAY_MS + jitter);
+      remoteRefreshAbortRef.current = options?.shouldAbort ?? null;
+      remoteRefreshTimerRef.current = window.setTimeout(() => {
+        remoteRefreshTimerRef.current = null;
+        const shouldAbort = remoteRefreshAbortRef.current;
+        remoteRefreshAbortRef.current = null;
+        if (shouldAbort?.()) {
+          return;
+        }
+        void backgroundRefreshRemoteLists();
+      }, delay);
+    },
+    [
+      backgroundRefreshRemoteLists,
+      clearScheduledRemoteRefresh,
+      isAuthenticated,
+      isClientOnline,
+    ]
+  );
+
+  useEffect(() => {
+    if (!isAuthenticated || !isClientOnline) {
+      clearScheduledRemoteRefresh();
+    }
+    return () => {
+      clearScheduledRemoteRefresh();
+    };
+  }, [clearScheduledRemoteRefresh, isAuthenticated, isClientOnline]);
+
   const refreshCollaborativeLists = useCallback(() => {
     if (!isAuthenticated || !isClientOnline) {
       return Promise.resolve();
@@ -527,7 +595,7 @@ export function ShoppingListProvider({ children }: { children: ReactNode }) {
       if (cancelled) {
         return;
       }
-      void backgroundRefreshRemoteLists({ shouldAbort: () => cancelled });
+      scheduleRemoteRefresh({ shouldAbort: () => cancelled });
     };
     tick();
     const intervalId = window.setInterval(tick, REMOTE_SYNC_INTERVAL_MS);
@@ -535,7 +603,7 @@ export function ShoppingListProvider({ children }: { children: ReactNode }) {
       cancelled = true;
       window.clearInterval(intervalId);
     };
-  }, [backgroundRefreshRemoteLists, isAuthenticated, isClientOnline]);
+  }, [isAuthenticated, isClientOnline, scheduleRemoteRefresh]);
 
   useEffect(() => {
     if (typeof window === "undefined" || isAuthenticated) return;
@@ -547,11 +615,11 @@ export function ShoppingListProvider({ children }: { children: ReactNode }) {
       return;
     }
     const handleFocus = () => {
-      void backgroundRefreshRemoteLists();
+      scheduleRemoteRefresh();
     };
     const handleVisibility = () => {
       if (document.visibilityState === "visible") {
-        void backgroundRefreshRemoteLists();
+        scheduleRemoteRefresh();
       }
     };
     window.addEventListener("focus", handleFocus);
@@ -560,7 +628,7 @@ export function ShoppingListProvider({ children }: { children: ReactNode }) {
       window.removeEventListener("focus", handleFocus);
       document.removeEventListener("visibilitychange", handleVisibility);
     };
-  }, [backgroundRefreshRemoteLists, isAuthenticated, isClientOnline]);
+  }, [isAuthenticated, isClientOnline, scheduleRemoteRefresh]);
 
   useEffect(() => {
     if (!isAuthenticated || !isClientOnline) {
@@ -568,7 +636,7 @@ export function ShoppingListProvider({ children }: { children: ReactNode }) {
     }
     const source = new EventSource("/api/live");
     const handleMessage = () => {
-      void backgroundRefreshRemoteLists();
+      scheduleRemoteRefresh();
     };
     source.onmessage = handleMessage;
     source.onerror = (event) => {
@@ -577,7 +645,7 @@ export function ShoppingListProvider({ children }: { children: ReactNode }) {
     return () => {
       source.close();
     };
-  }, [backgroundRefreshRemoteLists, isAuthenticated, isClientOnline]);
+  }, [isAuthenticated, isClientOnline, scheduleRemoteRefresh]);
 
   const runRemoteMutation = useCallback(
     async (action: () => Promise<Response>, ownerScope?: string | null) => {
@@ -599,7 +667,7 @@ export function ShoppingListProvider({ children }: { children: ReactNode }) {
           } | null;
           throw new Error(body?.error ?? "Shopping list request failed");
         }
-        void backgroundRefreshRemoteLists();
+        scheduleRemoteRefresh();
         if (ownerScope) {
           recordRecentMutation(ownerScope);
         }
@@ -620,7 +688,7 @@ export function ShoppingListProvider({ children }: { children: ReactNode }) {
         setIsSyncing(false);
       }
     },
-    [backgroundRefreshRemoteLists, isAuthenticated, recordRecentMutation]
+    [isAuthenticated, recordRecentMutation, scheduleRemoteRefresh]
   );
 
   const queueOfflineMutation = useCallback(
