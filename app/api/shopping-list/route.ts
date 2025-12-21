@@ -114,9 +114,10 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: "Invalid JSON" }, { status: 400 });
   }
 
-  const { ingredients, ownerId } = (payload ?? {}) as {
+  const { ingredients, ownerId, position } = (payload ?? {}) as {
     ingredients?: unknown;
     ownerId?: unknown;
+    position?: unknown;
   };
 
   const targetOwnerId =
@@ -135,6 +136,11 @@ export async function POST(request: Request) {
       { status: 400 }
     );
   }
+
+  const requestedPosition =
+    typeof position === "string" && position.toLowerCase() === "start"
+      ? "start"
+      : "end";
 
   const parsedEntries = ingredients
     .map((incoming) => incoming as IncomingIngredient)
@@ -162,7 +168,7 @@ export async function POST(request: Request) {
 
   const existingOrders = uniqueLabels.length
     ? await prisma.shoppingListEntry.findMany({
-      where: { ownerId: targetOwnerId, normalizedLabel: { in: uniqueLabels } },
+        where: { ownerId: targetOwnerId, normalizedLabel: { in: uniqueLabels } },
         select: { normalizedLabel: true, sortOrder: true },
         orderBy: { sortOrder: "asc" },
       })
@@ -175,16 +181,23 @@ export async function POST(request: Request) {
     }
   });
 
-  const maxOrderAggregate = await prisma.shoppingListEntry.aggregate({
+  const orderBounds = await prisma.shoppingListEntry.aggregate({
     where: { ownerId: targetOwnerId },
     _max: { sortOrder: true },
+    _min: { sortOrder: true },
   });
-  let orderCursor = maxOrderAggregate._max.sortOrder ?? -1;
+  let appendCursor = orderBounds._max.sortOrder ?? -1;
+  let prependCursor = (orderBounds._min.sortOrder ?? 0) - 1;
 
   uniqueLabels.forEach((label) => {
     if (!orderAssignments.has(label)) {
-      orderCursor += 1;
-      orderAssignments.set(label, orderCursor);
+      if (requestedPosition === "start") {
+        orderAssignments.set(label, prependCursor);
+        prependCursor -= 1;
+      } else {
+        appendCursor += 1;
+        orderAssignments.set(label, appendCursor);
+      }
     }
   });
 

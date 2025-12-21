@@ -36,11 +36,16 @@ type ShoppingListContextValue = {
   selectedListId: string | null;
   selectList: (ownerId: string) => void;
   renameList: (ownerId: string, nextLabel: string) => Promise<void>;
-  addItems: (items: IncomingIngredient[], ownerId?: string) => void;
+  addItems: (
+    items: IncomingIngredient[],
+    ownerId?: string,
+    options?: { position?: "start" | "end" }
+  ) => void;
   removeItem: (key: string, ownerId?: string) => void;
   clearList: (ownerId?: string) => void;
   reorderItems: (keys: string[], ownerId?: string) => void;
   setCrossedOff: (key: string, crossed: boolean, ownerId?: string) => void;
+  getEntriesForItem: (key: string, ownerId?: string) => QuantityEntry[] | null;
   updateQuantity: (
     key: string,
     quantityText: string,
@@ -74,6 +79,7 @@ type OfflineMutation =
       kind: "ADD_ITEMS";
       ownerId: string;
       ingredients: IncomingIngredient[];
+      position?: "start" | "end";
     }
   | { kind: "REMOVE_ITEM"; ownerId: string; label: string }
   | { kind: "CLEAR_LIST"; ownerId: string }
@@ -127,6 +133,11 @@ function readStoredState(): ShoppingListState {
 const getNextOrderValue = (state: ShoppingListState) => {
   const orders = Object.values(state).map((record) => record.order ?? 0);
   return orders.length ? Math.max(...orders) : -1;
+};
+
+const getLowestOrderValue = (state: ShoppingListState) => {
+  const orders = Object.values(state).map((record) => record.order ?? 0);
+  return orders.length ? Math.min(...orders) : null;
 };
 
 const LOCAL_OWNER_ID = "local";
@@ -628,6 +639,7 @@ export function ShoppingListProvider({ children }: { children: ReactNode }) {
                 body: JSON.stringify({
                   ingredients: mutation.ingredients,
                   ownerId: mutation.ownerId,
+                  position: mutation.position,
                 }),
               }),
             mutation.ownerId
@@ -745,10 +757,16 @@ export function ShoppingListProvider({ children }: { children: ReactNode }) {
   );
 
   const addItems = useCallback(
-    (ingredients: IncomingIngredient[], ownerOverride?: string) => {
+    (
+      ingredients: IncomingIngredient[],
+      ownerOverride?: string,
+      options?: { position?: "start" | "end" }
+    ) => {
       if (!ingredients.length) return;
       if (!isAuthenticated) {
-        setLocalStore((current) => addIngredientsToState(current, ingredients));
+        setLocalStore((current) =>
+          addIngredientsToState(current, ingredients, options?.position)
+        );
         return;
       }
 
@@ -760,13 +778,14 @@ export function ShoppingListProvider({ children }: { children: ReactNode }) {
 
       if (!isClientOnline) {
         const didUpdate = applyOwnerStateMutation(targetOwnerId, (state) =>
-          addIngredientsToState(state, ingredients)
+          addIngredientsToState(state, ingredients, options?.position)
         );
         if (didUpdate) {
           queueOfflineMutation({
             kind: "ADD_ITEMS",
             ownerId: targetOwnerId,
             ingredients,
+            position: options?.position,
           });
         }
         return;
@@ -777,7 +796,11 @@ export function ShoppingListProvider({ children }: { children: ReactNode }) {
           fetch("/api/shopping-list", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ ingredients, ownerId: targetOwnerId }),
+            body: JSON.stringify({
+              ingredients,
+              ownerId: targetOwnerId,
+              position: options?.position,
+            }),
           }),
         targetOwnerId
       );
@@ -1028,6 +1051,45 @@ export function ShoppingListProvider({ children }: { children: ReactNode }) {
       runRemoteMutation,
       setLocalStore,
     ]
+  );
+
+  const getEntriesForItem = useCallback(
+    (key: string, ownerOverride?: string) => {
+      if (!key) {
+        return null;
+      }
+
+      const readEntries = (state: ShoppingListState | null | undefined) => {
+        const record = state?.[key];
+        if (!record) {
+          return null;
+        }
+        return record.entries.map((entry) => ({ ...entry }));
+      };
+
+      if (!isAuthenticated) {
+        return readEntries(localStore);
+      }
+
+      const targetOwnerId = resolveOwnerId(ownerOverride);
+      if (!targetOwnerId) {
+        return null;
+      }
+
+      if (targetOwnerId === LOCAL_OWNER_ID) {
+        return readEntries(localStore);
+      }
+
+      const targetList = remoteLists.find(
+        (list) => list.ownerId === targetOwnerId
+      );
+      if (!targetList) {
+        return null;
+      }
+
+      return readEntries(targetList.state);
+    },
+    [isAuthenticated, localStore, remoteLists, resolveOwnerId]
   );
 
   const updateItemQuantity = useCallback(
@@ -1293,6 +1355,7 @@ export function ShoppingListProvider({ children }: { children: ReactNode }) {
       clearList,
       reorderItems,
       setCrossedOff,
+      getEntriesForItem,
       updateQuantity: updateItemQuantity,
       totalItems,
       isSyncing,
@@ -1313,6 +1376,7 @@ export function ShoppingListProvider({ children }: { children: ReactNode }) {
       clearList,
       reorderItems,
       setCrossedOff,
+      getEntriesForItem,
       updateItemQuantity,
       totalItems,
       isSyncing,
@@ -1343,13 +1407,16 @@ export function useShoppingList() {
 
 function addIngredientsToState(
   state: ShoppingListState,
-  ingredients: IncomingIngredient[]
+  ingredients: IncomingIngredient[],
+  position: "start" | "end" = "end"
 ): ShoppingListState {
   if (!ingredients.length) {
     return state;
   }
   const next = { ...state };
   let orderCursor = getNextOrderValue(next);
+  const lowestOrder = getLowestOrderValue(next);
+  let prependCursor = (lowestOrder ?? 0) - 1;
   let updated = false;
   ingredients.forEach(({ value, recipeId, recipeTitle }) => {
     const parsed = parseIngredient(value);
@@ -1373,11 +1440,12 @@ function addIngredientsToState(
         crossedOffAt: null,
       };
     } else {
-      orderCursor += 1;
+      const assignedOrder =
+        position === "start" ? prependCursor-- : (orderCursor += 1);
       next[key] = {
         label: parsed.label,
         entries: [entry],
-        order: orderCursor,
+        order: assignedOrder,
         crossedOffAt: null,
       };
     }
