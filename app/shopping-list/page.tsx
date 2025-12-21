@@ -437,12 +437,14 @@ export default function ShoppingListPage() {
     (item: ShoppingListItem, nextCrossed: boolean) => {
       const ownerId = item.ownerId;
       setCrossedOff(item.storageKey, nextCrossed, ownerId);
-      if (nextCrossed) {
-        showToast(`${item.label} checked off`, "info", {
+      showToast(
+        `${item.label} ${nextCrossed ? "checked off" : "restored"}`,
+        nextCrossed ? "success" : "info",
+        {
           actionLabel: "Undo",
-          onClick: () => setCrossedOff(item.storageKey, false, ownerId),
-        });
-      }
+          onClick: () => setCrossedOff(item.storageKey, !nextCrossed, ownerId),
+        }
+      );
     },
     [setCrossedOff, showToast]
   );
@@ -459,7 +461,7 @@ export default function ShoppingListPage() {
         ...ingredient,
       }));
       removeItem(item.storageKey, ownerId);
-      showToast(`${item.label} removed`, "info", {
+      showToast(`${item.label} removed`, "error", {
         actionLabel: "Undo",
         onClick: () => addItems(undoIngredients, ownerId),
       });
