@@ -696,12 +696,12 @@ export default function ShoppingListPage() {
     const isSwipeActive = isSwipeTarget && swipePreview.isActive;
     const swipeBackdropVisible =
       isSwipeTarget && Math.abs(swipePreview.deltaX) > 4;
-      const cardClasses = `flex items-center gap-3 rounded-[28px] border px-4 py-3 text-sm shadow-sm transition ${
+    const cardClasses = `flex items-center gap-3 rounded-[28px] border px-4 py-3 text-sm shadow-sm transition ${
       draggingKey === item.storageKey
         ? "border-rose-200 bg-rose-50/90 opacity-80 ring-2 ring-rose-100"
         : isCrossed
         ? "border-slate-100 bg-white/80 opacity-70"
-          : "border-sky-100 bg-gradient-to-br from-white via-sky-50/80 to-white hover:shadow-md"
+        : "border-sky-100 bg-gradient-to-br from-white via-sky-50/80 to-white hover:shadow-md"
     }`;
 
     return (
@@ -782,8 +782,8 @@ export default function ShoppingListPage() {
               >
                 {item.unitSummary}
               </button>
-                {quantityEditor?.key === item.storageKey && (
-                  <span className="rounded-full border border-sky-200 bg-sky-50 px-3 py-1 text-[10px] font-semibold uppercase tracking-[0.3em] text-sky-600">
+              {quantityEditor?.key === item.storageKey && (
+                <span className="rounded-full border border-sky-200 bg-sky-50 px-3 py-1 text-[10px] font-semibold uppercase tracking-[0.3em] text-sky-600">
                   Editing…
                 </span>
               )}
@@ -837,9 +837,9 @@ export default function ShoppingListPage() {
     return elements;
   })();
 
-    return (
-      <div className="min-h-screen bg-gradient-to-br from-slate-50 via-sky-50 to-white px-4 py-12 text-slate-900">
-      <main className="mx-auto flex w-full max-w-5xl flex-col gap-10">
+  return (
+    <div className="min-h-screen bg-gradient-to-br from-slate-50 via-sky-50 to-white px-4 py-8 text-slate-900 sm:py-12">
+      <main className="mx-auto flex w-full max-w-5xl flex-col gap-6 sm:gap-8 lg:gap-10">
         <AppNav />
         <header className="rounded-3xl border border-white/60 bg-white/85 p-6 shadow-xl shadow-rose-100/60 backdrop-blur">
           <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
@@ -890,8 +890,8 @@ export default function ShoppingListPage() {
             </div>
           )}
         </header>
-        <section className="rounded-3xl border border-white/70 bg-white/90 p-8 shadow-xl shadow-slate-200/70 backdrop-blur">
-          <div className="rounded-2xl border border-sky-100 bg-gradient-to-r from-white via-sky-50 to-white px-4 py-4 shadow-inner shadow-sky-100/60">
+        <section className="rounded-3xl border border-white/70 bg-white/90 p-6 shadow-xl shadow-slate-200/70 backdrop-blur sm:p-8">
+          <div className="rounded-2xl border border-sky-100 bg-gradient-to-r from-white via-sky-50 to-white px-4 py-3 shadow-inner shadow-sky-100/60 sm:py-4">
             {isQuickAddActive ? (
               <form onSubmit={handleQuickAddSubmit} className="space-y-3">
                 <label className="block text-xs font-semibold uppercase tracking-[0.3em] text-slate-400">
@@ -935,16 +935,16 @@ export default function ShoppingListPage() {
                 )}
               </form>
             ) : (
-                <button
-                  type="button"
-                  onClick={handleStartQuickAdd}
-                  className="w-full rounded-2xl border border-dashed border-sky-200 bg-white/70 px-4 py-3 text-sm font-semibold text-slate-600 shadow-sm transition hover:border-sky-300 hover:text-slate-900"
-                >
+              <button
+                type="button"
+                onClick={handleStartQuickAdd}
+                className="w-full rounded-2xl border border-dashed border-sky-200 bg-white/70 px-4 py-3 text-sm font-semibold text-slate-600 shadow-sm transition hover:border-sky-300 hover:text-slate-900"
+              >
                 + Add ingredient
               </button>
             )}
           </div>
-          <div className="mt-6">
+          <div className="mt-4 sm:mt-6">
             {showEmptyState ? (
               <div className="flex flex-col items-center gap-4 text-center text-slate-500">
                 <div className="text-6xl">🥕</div>

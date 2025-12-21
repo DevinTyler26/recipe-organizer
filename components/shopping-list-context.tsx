@@ -325,7 +325,12 @@ export function ShoppingListProvider({ children }: { children: ReactNode }) {
 
   const backgroundRefreshRemoteLists = useCallback(
     async (options?: { shouldAbort?: () => boolean }) => {
-      if (!isAuthenticated || !isClientOnline) {
+      if (
+        !isAuthenticated ||
+        !isClientOnline ||
+        pendingOwnerMutationsRef.current.size > 0
+      ) {
+        // Avoid clobbering optimistic changes while a mutation is in flight.
         return;
       }
       const shouldAbort = options?.shouldAbort;
