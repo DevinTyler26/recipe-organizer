@@ -188,7 +188,7 @@ export function ShoppingListProvider({ children }: { children: ReactNode }) {
     useState<ExternalListUpdateNotice | null>(null);
   const listSignatureRef = useRef<Map<string, string>>(new Map());
   const pendingOwnerMutationsRef = useRef<Map<string, number>>(new Map());
-  const ownerMutationEpochRef = useRef<Map<string, number>>(new Map());
+  const ownerPendingCountRef = useRef<Map<string, number>>(new Map());
   const recentMutationRef = useRef<Map<string, number>>(new Map());
   const hasPrimedListSignaturesRef = useRef(false);
   const offlineMutationsRef = useRef<OfflineMutation[]>([]);
@@ -544,11 +544,10 @@ export function ShoppingListProvider({ children }: { children: ReactNode }) {
           error: new Error("You need to sign in to sync this list"),
         } as const;
       }
-      let mutationEpoch: number | null = null;
       if (ownerScope) {
-        const nextEpoch = (ownerMutationEpochRef.current.get(ownerScope) ?? 0) + 1;
-        ownerMutationEpochRef.current.set(ownerScope, nextEpoch);
-        mutationEpoch = nextEpoch;
+        const nextCount =
+          (ownerPendingCountRef.current.get(ownerScope) ?? 0) + 1;
+        ownerPendingCountRef.current.set(ownerScope, nextCount);
         pendingOwnerMutationsRef.current.set(ownerScope, Date.now());
       }
       setIsSyncing(true);
@@ -560,11 +559,12 @@ export function ShoppingListProvider({ children }: { children: ReactNode }) {
           } | null;
           throw new Error(body?.error ?? "Shopping list request failed");
         }
-        const nextLists = await fetchRemoteLists();
-        const isLatestMutation = ownerScope
-          ? ownerMutationEpochRef.current.get(ownerScope) === mutationEpoch
-          : true;
-        if (isLatestMutation) {
+        const pendingCount = ownerScope
+          ? ownerPendingCountRef.current.get(ownerScope) ?? 0
+          : 0;
+        const shouldCommit = !ownerScope || pendingCount === 1;
+        if (shouldCommit) {
+          const nextLists = await fetchRemoteLists();
           commitRemoteLists(nextLists);
           setIsRemote(true);
           setSelectedOwnerId((current) => {
@@ -590,6 +590,13 @@ export function ShoppingListProvider({ children }: { children: ReactNode }) {
         } as const;
       } finally {
         if (ownerScope) {
+          const remaining =
+            (ownerPendingCountRef.current.get(ownerScope) ?? 1) - 1;
+          if (remaining <= 0) {
+            ownerPendingCountRef.current.delete(ownerScope);
+          } else {
+            ownerPendingCountRef.current.set(ownerScope, remaining);
+          }
           pendingOwnerMutationsRef.current.delete(ownerScope);
         }
         setIsSyncing(false);
@@ -601,7 +608,7 @@ export function ShoppingListProvider({ children }: { children: ReactNode }) {
       evaluateRemoteListChanges,
       fetchRemoteLists,
       isAuthenticated,
-      ownerMutationEpochRef,
+      ownerPendingCountRef,
       recordRecentMutation,
     ]
   );
