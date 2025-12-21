@@ -6,9 +6,11 @@ import {
   useCallback,
   useEffect,
   useMemo,
+  useRef,
   useState,
   type DragEvent,
   type FormEvent,
+  type TouchEvent,
 } from "react";
 import { AppNav } from "@/components/app-nav";
 import { useCollaborationUI } from "@/components/collaboration-ui-context";
@@ -18,6 +20,7 @@ import {
   getMeasureDisplay,
   MEASURE_OPTIONS,
   normalizeMeasureText,
+  type ShoppingListItem,
 } from "@/lib/shopping-list";
 
 type QuantityEditorState = {
@@ -44,6 +47,28 @@ const UNICODE_FRACTIONS: Record<string, number> = {
 
 const isKnownMeasure = (value: string) =>
   Boolean(value && MEASURE_OPTIONS.some((option) => option.value === value));
+
+const SWIPE_TRIGGER_THRESHOLD = 64;
+const SWIPE_MAX_OFFSET = 120;
+const INTERACTIVE_SWIPE_SELECTOR =
+  "button, a, input, textarea, select, [role='button']";
+
+type SwipeSession = {
+  key: string;
+  startX: number;
+  startY: number;
+  deltaX: number;
+  direction: "pending" | "horizontal" | "vertical";
+};
+
+type SwipePreviewState = {
+  key: string | null;
+  deltaX: number;
+  isActive: boolean;
+};
+
+const clamp = (value: number, min: number, max: number) =>
+  Math.min(max, Math.max(min, value));
 
 const guessStructuredFields = (summary: string) => {
   const trimmed = summary.trim();
@@ -137,6 +162,7 @@ export default function ShoppingListPage() {
     removeItem,
     clearList,
     reorderItems,
+    setCrossedOff,
     updateQuantity,
     totalItems,
     isSyncing,
@@ -151,6 +177,13 @@ export default function ShoppingListPage() {
   const [quantityError, setQuantityError] = useState<string | null>(null);
   const [isQuantitySaving, setIsQuantitySaving] = useState(false);
   const [hasHydrated, setHasHydrated] = useState(false);
+  const [isConfirmingClear, setIsConfirmingClear] = useState(false);
+  const swipeSessionRef = useRef<SwipeSession | null>(null);
+  const [swipePreview, setSwipePreview] = useState<SwipePreviewState>({
+    key: null,
+    deltaX: 0,
+    isActive: false,
+  });
   const activeList =
     lists.find((list) => list.ownerId === selectedListId) ?? lists[0] ?? null;
   const activeOwnerId = activeList?.ownerId ?? null;
@@ -358,6 +391,134 @@ export default function ShoppingListPage() {
     [quantityEditor, updateQuantity]
   );
 
+  const handleDeleteItem = useCallback(
+    (storageKey: string) => {
+      removeItem(storageKey, activeOwnerId ?? undefined);
+    },
+    [activeOwnerId, removeItem]
+  );
+
+  const handleCrossToggle = useCallback(
+    (storageKey: string, nextCrossed: boolean) => {
+      setCrossedOff(storageKey, nextCrossed, activeOwnerId ?? undefined);
+    },
+    [activeOwnerId, setCrossedOff]
+  );
+
+  const handleRequestClear = useCallback(() => {
+    setIsConfirmingClear(true);
+  }, []);
+
+  const handleCancelClear = useCallback(() => {
+    setIsConfirmingClear(false);
+  }, []);
+
+  const handleConfirmClear = useCallback(() => {
+    clearList(activeOwnerId ?? undefined);
+    setIsConfirmingClear(false);
+  }, [activeOwnerId, clearList]);
+
+  const resetSwipePreview = useCallback(() => {
+    swipeSessionRef.current = null;
+    setSwipePreview({ key: null, deltaX: 0, isActive: false });
+  }, []);
+
+  const handleSwipeStart = useCallback(
+    (event: TouchEvent<HTMLDivElement>, item: ShoppingListItem) => {
+      if (event.touches.length !== 1) {
+        return;
+      }
+      const target = event.target;
+      if (
+        target instanceof Element &&
+        target.closest(INTERACTIVE_SWIPE_SELECTOR)
+      ) {
+        return;
+      }
+      const touch = event.touches[0];
+      swipeSessionRef.current = {
+        key: item.storageKey,
+        startX: touch.clientX,
+        startY: touch.clientY,
+        deltaX: 0,
+        direction: "pending",
+      };
+      setSwipePreview({ key: item.storageKey, deltaX: 0, isActive: true });
+    },
+    []
+  );
+
+  const handleSwipeMove = useCallback(
+    (event: TouchEvent<HTMLDivElement>, item: ShoppingListItem) => {
+      const session = swipeSessionRef.current;
+      if (!session || session.key !== item.storageKey) {
+        return;
+      }
+      if (event.touches.length !== 1) {
+        resetSwipePreview();
+        return;
+      }
+      const touch = event.touches[0];
+      const deltaX = touch.clientX - session.startX;
+      const deltaY = touch.clientY - session.startY;
+
+      if (session.direction === "pending") {
+        if (Math.abs(deltaX) < 6 && Math.abs(deltaY) < 6) {
+          return;
+        }
+        if (Math.abs(deltaY) > Math.abs(deltaX)) {
+          resetSwipePreview();
+          return;
+        }
+        session.direction = "horizontal";
+      }
+
+      if (session.direction !== "horizontal") {
+        return;
+      }
+
+      if (event.cancelable) {
+        event.preventDefault();
+      }
+      const clamped = clamp(deltaX, -SWIPE_MAX_OFFSET, SWIPE_MAX_OFFSET);
+      session.deltaX = clamped;
+      setSwipePreview({ key: session.key, deltaX: clamped, isActive: true });
+    },
+    [resetSwipePreview]
+  );
+
+  const finalizeSwipe = useCallback(
+    (item: ShoppingListItem, shouldCancel?: boolean) => {
+      const session = swipeSessionRef.current;
+      const isActiveSession = Boolean(
+        session && session.key === item.storageKey
+      );
+      const deltaX = isActiveSession ? session!.deltaX : 0;
+      const direction = isActiveSession ? session!.direction : "pending";
+      resetSwipePreview();
+      if (!isActiveSession || shouldCancel || direction !== "horizontal") {
+        return;
+      }
+      if (deltaX <= -SWIPE_TRIGGER_THRESHOLD) {
+        handleDeleteItem(item.storageKey);
+      } else if (deltaX >= SWIPE_TRIGGER_THRESHOLD) {
+        const isCurrentlyCrossed = Boolean(item.crossedOffAt);
+        handleCrossToggle(item.storageKey, !isCurrentlyCrossed);
+      }
+    },
+    [handleCrossToggle, handleDeleteItem, resetSwipePreview]
+  );
+
+  const handleSwipeEnd = useCallback(
+    (item: ShoppingListItem) => finalizeSwipe(item, false),
+    [finalizeSwipe]
+  );
+
+  const handleSwipeCancel = useCallback(
+    (item: ShoppingListItem) => finalizeSwipe(item, true),
+    [finalizeSwipe]
+  );
+
   useEffect(() => {
     setHasHydrated(true);
   }, []);
@@ -372,8 +533,36 @@ export default function ShoppingListPage() {
     return `${totalItems} item${totalItems === 1 ? "" : "s"} ready to shop.`;
   }, [emptyState, hasHydrated, totalItems]);
 
-  const renderItems = hasHydrated ? items : [];
-  const renderEmptyState = hasHydrated ? emptyState : true;
+  const rawItems = hasHydrated ? items : [];
+
+  const displayItems = useMemo(() => {
+    if (!hasHydrated) {
+      return rawItems;
+    }
+    return rawItems
+      .map((item, index) => ({
+        item,
+        index,
+        crossedAt: item.crossedOffAt ?? null,
+      }))
+      .sort((a, b) => {
+        const aCrossed = a.crossedAt !== null;
+        const bCrossed = b.crossedAt !== null;
+        if (aCrossed && bCrossed) {
+          if (a.crossedAt === b.crossedAt) {
+            return a.index - b.index;
+          }
+          return (a.crossedAt ?? 0) - (b.crossedAt ?? 0);
+        }
+        if (aCrossed || bCrossed) {
+          return aCrossed ? 1 : -1;
+        }
+        return a.index - b.index;
+      })
+      .map((entry) => entry.item);
+  }, [hasHydrated, rawItems]);
+
+  const renderEmptyState = hasHydrated ? rawItems.length === 0 : true;
   const showEmptyState = renderEmptyState && !isSyncing;
   const clearButtonDisabled =
     !hasHydrated || renderEmptyState || isSyncing || !activeOwnerId;
@@ -408,7 +597,7 @@ export default function ShoppingListPage() {
               </Link>
               <button
                 type="button"
-                onClick={() => clearList(activeOwnerId ?? undefined)}
+                onClick={handleRequestClear}
                 disabled={clearButtonDisabled}
                 className="inline-flex items-center justify-center rounded-2xl bg-slate-900 px-4 py-2 text-sm font-semibold text-white shadow-lg shadow-slate-900/25 transition disabled:cursor-not-allowed disabled:bg-slate-400"
               >
@@ -461,65 +650,175 @@ export default function ShoppingListPage() {
               }}
               onDrop={handleListDrop}
             >
-              {renderItems.map((item) => (
-                <li
-                  key={item.id}
-                  draggable
-                  onDragStart={(event) => beginDrag(item.storageKey, event)}
-                  onDragOver={(event) => {
-                    event.preventDefault();
-                    event.dataTransfer.dropEffect = "move";
-                  }}
-                  onDrop={(event) => handleItemDrop(event, item.storageKey)}
-                  onDragEnd={finalizeDrag}
-                  aria-grabbed={draggingKey === item.storageKey}
-                  className={`flex flex-col gap-4 cursor-grab rounded-2xl border border-slate-100 bg-white/90 px-5 py-4 shadow-sm shadow-slate-100 transition active:cursor-grabbing sm:flex-row sm:items-center sm:justify-between ${
-                    draggingKey === item.storageKey
-                      ? "opacity-60 ring-2 ring-rose-200"
-                      : "hover:-translate-y-0.5"
-                  }`}
-                >
-                  <div className="w-full flex flex-col gap-3">
-                    <p className="text-base font-semibold text-slate-900">
-                      {item.label}
-                    </p>
-                    <div className="flex flex-wrap items-center gap-3 text-xs font-semibold text-slate-500">
-                      <button
-                        type="button"
-                        onClick={() =>
-                          beginQuantityEdit(item.storageKey, item.unitSummary)
-                        }
-                        className="inline-flex items-center rounded-full border border-slate-200 bg-white/70 px-3 py-1 text-[10px] font-semibold uppercase tracking-[0.3em] text-slate-600 transition hover:border-slate-300 hover:text-slate-900"
-                        title="Adjust quantity"
-                      >
-                        {item.unitSummary}
-                      </button>
-                      {quantityEditor?.key === item.storageKey && (
-                        <span className="rounded-full border border-amber-200 bg-amber-50 px-3 py-1 text-[10px] font-semibold uppercase tracking-[0.3em] text-amber-600">
-                          Editing…
-                        </span>
-                      )}
-                    </div>
-                    {item.sources.length > 0 && (
-                      <p className="text-[11px] uppercase tracking-[0.3em] text-rose-400">
-                        From {item.sources.join(" · ")}
-                      </p>
-                    )}
-                  </div>
-                  <button
-                    type="button"
-                    onClick={() =>
-                      removeItem(item.storageKey, activeOwnerId ?? undefined)
-                    }
-                    className="w-full rounded-full border border-slate-200 px-4 py-2 text-center text-xs font-semibold uppercase tracking-[0.2em] text-slate-500 transition hover:border-rose-200 hover:text-rose-500 sm:w-auto"
+              {displayItems.map((item) => {
+                const isCrossed = Boolean(item.crossedOffAt);
+                const isSwipeTarget = swipePreview.key === item.storageKey;
+                const swipeOffset = clamp(
+                  isSwipeTarget ? swipePreview.deltaX : 0,
+                  -SWIPE_MAX_OFFSET,
+                  SWIPE_MAX_OFFSET
+                );
+                const isSwipeActive = isSwipeTarget && swipePreview.isActive;
+                const swipeBackdropVisible =
+                  isSwipeTarget && Math.abs(swipePreview.deltaX) > 4;
+                const draggableClasses = `flex flex-col gap-4 cursor-grab rounded-2xl border border-slate-100 bg-white/90 px-5 py-4 shadow-sm shadow-slate-100 transition active:cursor-grabbing sm:flex-row sm:items-center sm:justify-between ${
+                  draggingKey === item.storageKey
+                    ? "opacity-60 ring-2 ring-rose-200"
+                    : isCrossed
+                    ? "opacity-70"
+                    : "hover:-translate-y-0.5"
+                }`;
+                return (
+                  <li
+                    key={item.id}
+                    draggable
+                    onDragStart={(event) => beginDrag(item.storageKey, event)}
+                    onDragOver={(event) => {
+                      event.preventDefault();
+                      event.dataTransfer.dropEffect = "move";
+                    }}
+                    onDrop={(event) => handleItemDrop(event, item.storageKey)}
+                    onDragEnd={finalizeDrag}
+                    aria-grabbed={draggingKey === item.storageKey}
+                    className="relative"
                   >
-                    Cross off item
-                  </button>
-                </li>
-              ))}
+                    <div
+                      className={`pointer-events-none absolute inset-0 flex select-none items-center rounded-2xl bg-gradient-to-r from-emerald-50 via-white to-rose-50 px-5 transition-opacity ${
+                        swipeBackdropVisible ? "opacity-100" : "opacity-0"
+                      }`}
+                    >
+                      <div className="flex flex-1 items-center text-3xl text-emerald-500">
+                        ✓
+                      </div>
+                      <div className="flex flex-1 items-center justify-end text-3xl text-rose-500">
+                        ✕
+                      </div>
+                    </div>
+                    <div
+                      className={`${draggableClasses} relative z-10`}
+                      style={{
+                        transform: `translateX(${swipeOffset}px)`,
+                        transition: isSwipeActive
+                          ? "none"
+                          : "transform 0.2s ease",
+                        touchAction: isSwipeActive ? "none" : "pan-y",
+                      }}
+                      onTouchStart={(event) => handleSwipeStart(event, item)}
+                      onTouchMove={(event) => handleSwipeMove(event, item)}
+                      onTouchEnd={() => handleSwipeEnd(item)}
+                      onTouchCancel={() => handleSwipeCancel(item)}
+                    >
+                      <div className="w-full flex flex-col gap-3">
+                        <p
+                          className={`text-base font-semibold ${
+                            isCrossed
+                              ? "text-slate-400 line-through"
+                              : "text-slate-900"
+                          }`}
+                        >
+                          {item.label}
+                        </p>
+                        <div className="flex flex-wrap items-center gap-3 text-xs font-semibold text-slate-500">
+                          <button
+                            type="button"
+                            onClick={() =>
+                              beginQuantityEdit(
+                                item.storageKey,
+                                item.unitSummary
+                              )
+                            }
+                            className={`inline-flex items-center rounded-full border border-slate-200 bg-white/70 px-3 py-1 text-[10px] font-semibold uppercase tracking-[0.3em] transition hover:border-slate-300 ${
+                              isCrossed
+                                ? "text-slate-400"
+                                : "text-slate-600 hover:text-slate-900"
+                            }`}
+                            title="Adjust quantity"
+                          >
+                            {item.unitSummary}
+                          </button>
+                          {quantityEditor?.key === item.storageKey && (
+                            <span className="rounded-full border border-amber-200 bg-amber-50 px-3 py-1 text-[10px] font-semibold uppercase tracking-[0.3em] text-amber-600">
+                              Editing…
+                            </span>
+                          )}
+                        </div>
+                        {item.sources.length > 0 && (
+                          <p
+                            className={`text-[11px] uppercase tracking-[0.3em] ${
+                              isCrossed ? "text-rose-200" : "text-rose-400"
+                            }`}
+                          >
+                            From {item.sources.join(" · ")}
+                          </p>
+                        )}
+                      </div>
+                      <div className="hidden w-full flex-col gap-2 sm:flex sm:w-auto sm:flex-row">
+                        <button
+                          type="button"
+                          aria-pressed={isCrossed}
+                          onClick={() =>
+                            handleCrossToggle(item.storageKey, !isCrossed)
+                          }
+                          className={`w-full rounded-full border px-4 py-2 text-center text-xs font-semibold uppercase tracking-[0.2em] transition sm:w-auto ${
+                            isCrossed
+                              ? "border-emerald-200 bg-emerald-50 text-emerald-600"
+                              : "border-slate-200 text-slate-500 hover:border-emerald-200 hover:text-emerald-600"
+                          }`}
+                        >
+                          {isCrossed ? "Restore item" : "Cross off item"}
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => handleDeleteItem(item.storageKey)}
+                          className="w-full rounded-full border border-rose-200 px-4 py-2 text-center text-xs font-semibold uppercase tracking-[0.2em] text-rose-500 transition hover:bg-rose-50 sm:w-auto"
+                        >
+                          Delete
+                        </button>
+                      </div>
+                    </div>
+                  </li>
+                );
+              })}
             </ul>
           )}
         </section>
+        {isConfirmingClear && (
+          <div className="fixed inset-0 z-60 flex items-center justify-center px-4 py-6">
+            <button
+              type="button"
+              aria-label="Cancel clearing list"
+              className="absolute inset-0 bg-slate-900/50 backdrop-blur-sm"
+              onClick={handleCancelClear}
+            />
+            <div className="relative z-10 w-full max-w-md rounded-3xl border border-white/40 bg-white/95 p-6 text-slate-900 shadow-2xl shadow-rose-200/70">
+              <p className="text-xs font-semibold uppercase tracking-[0.3em] text-slate-400">
+                Clear list
+              </p>
+              <p className="mt-2 text-lg font-semibold text-slate-900">
+                Remove every ingredient?
+              </p>
+              <p className="mt-1 text-sm text-slate-500">
+                This action removes all items from the active shopping list.
+              </p>
+              <div className="mt-6 flex flex-col gap-3 sm:flex-row sm:justify-end">
+                <button
+                  type="button"
+                  onClick={handleCancelClear}
+                  className="w-full rounded-2xl border border-slate-200 px-4 py-2 text-xs font-semibold uppercase tracking-[0.2em] text-slate-600 transition hover:border-slate-300 sm:w-auto"
+                >
+                  Keep list
+                </button>
+                <button
+                  type="button"
+                  onClick={handleConfirmClear}
+                  className="w-full rounded-2xl bg-rose-500 px-4 py-2 text-xs font-semibold uppercase tracking-[0.2em] text-white shadow-lg shadow-rose-200/70 transition hover:bg-rose-600 sm:w-auto"
+                >
+                  Yes, clear it
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
         {quantityEditor && editingItem && (
           <div className="fixed inset-0 z-50 flex items-center justify-center px-4 py-6">
             <button

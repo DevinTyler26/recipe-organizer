@@ -137,6 +137,7 @@ model ShoppingListEntry {
   measureText       String?
   sourceRecipeId    String?
   sourceRecipeTitle String?
+  crossedOffAt      DateTime?
   createdAt         DateTime @default(now())
   sortOrder         Int      @default(0)
 

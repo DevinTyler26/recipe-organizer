@@ -40,6 +40,7 @@ type ShoppingListContextValue = {
   removeItem: (key: string, ownerId?: string) => void;
   clearList: (ownerId?: string) => void;
   reorderItems: (keys: string[], ownerId?: string) => void;
+  setCrossedOff: (key: string, crossed: boolean, ownerId?: string) => void;
   updateQuantity: (
     key: string,
     quantityText: string,
@@ -82,6 +83,12 @@ type OfflineMutation =
       ownerId: string;
       label: string;
       quantity: string;
+    }
+  | {
+      kind: "SET_CROSSED_OFF";
+      ownerId: string;
+      label: string;
+      crossedOffAt: number | null;
     };
 
 export type ShoppingListListMeta = {
@@ -675,6 +682,20 @@ export function ShoppingListProvider({ children }: { children: ReactNode }) {
               }),
             mutation.ownerId
           );
+        case "SET_CROSSED_OFF":
+          return runRemoteMutation(
+            () =>
+              fetch("/api/shopping-list", {
+                method: "PATCH",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                  ownerId: mutation.ownerId,
+                  label: mutation.label,
+                  crossedOffAt: mutation.crossedOffAt,
+                }),
+              }),
+            mutation.ownerId
+          );
         default:
           return Promise.resolve({ success: true } as const);
       }
@@ -932,6 +953,80 @@ export function ShoppingListProvider({ children }: { children: ReactNode }) {
       remoteLists,
       resolveOwnerId,
       runRemoteMutation,
+    ]
+  );
+
+  const setCrossedOff = useCallback(
+    (key: string, crossed: boolean, ownerOverride?: string) => {
+      if (!key) {
+        return;
+      }
+      const timestamp = crossed ? Date.now() : null;
+
+      if (!isAuthenticated) {
+        setLocalStore((current) => setCrossedOffFlag(current, key, timestamp));
+        return;
+      }
+
+      const targetOwnerId = resolveOwnerId(ownerOverride);
+      if (!targetOwnerId) {
+        return;
+      }
+
+      if (!isClientOnline) {
+        const didUpdate = applyOwnerStateMutation(targetOwnerId, (state) =>
+          setCrossedOffFlag(state, key, timestamp)
+        );
+        if (didUpdate) {
+          queueOfflineMutation({
+            kind: "SET_CROSSED_OFF",
+            ownerId: targetOwnerId,
+            label: key,
+            crossedOffAt: timestamp,
+          });
+        }
+        return;
+      }
+
+      commitRemoteLists((current) => {
+        let changed = false;
+        const next = current.map((list) => {
+          if (list.ownerId !== targetOwnerId) {
+            return list;
+          }
+          const nextState = setCrossedOffFlag(list.state, key, timestamp);
+          if (nextState === list.state) {
+            return list;
+          }
+          changed = true;
+          return { ...list, state: nextState };
+        });
+        return changed ? next : current;
+      });
+
+      void runRemoteMutation(
+        () =>
+          fetch("/api/shopping-list", {
+            method: "PATCH",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              ownerId: targetOwnerId,
+              label: key,
+              crossedOffAt: timestamp,
+            }),
+          }),
+        targetOwnerId
+      );
+    },
+    [
+      applyOwnerStateMutation,
+      commitRemoteLists,
+      isAuthenticated,
+      isClientOnline,
+      queueOfflineMutation,
+      resolveOwnerId,
+      runRemoteMutation,
+      setLocalStore,
     ]
   );
 
@@ -1197,6 +1292,7 @@ export function ShoppingListProvider({ children }: { children: ReactNode }) {
       removeItem,
       clearList,
       reorderItems,
+      setCrossedOff,
       updateQuantity: updateItemQuantity,
       totalItems,
       isSyncing,
@@ -1216,6 +1312,7 @@ export function ShoppingListProvider({ children }: { children: ReactNode }) {
       removeItem,
       clearList,
       reorderItems,
+      setCrossedOff,
       updateItemQuantity,
       totalItems,
       isSyncing,
@@ -1273,6 +1370,7 @@ function addIngredientsToState(
         label: parsed.label,
         entries: [...existing.entries, entry],
         order: existing.order,
+        crossedOffAt: null,
       };
     } else {
       orderCursor += 1;
@@ -1280,6 +1378,7 @@ function addIngredientsToState(
         label: parsed.label,
         entries: [entry],
         order: orderCursor,
+        crossedOffAt: null,
       };
     }
     updated = true;
@@ -1322,6 +1421,7 @@ function mapStateToItems(
       ownerId: meta.ownerId,
       ownerLabel: meta.ownerLabel,
       isSelf: meta.isSelf,
+      crossedOffAt: record.crossedOffAt ?? null,
     }))
     .sort((a, b) => {
       if (a.order !== b.order) {
@@ -1336,6 +1436,7 @@ function serializeListState(state: ShoppingListState) {
     .map(([key, record]) => ({
       key,
       order: record.order ?? 0,
+      crossedOffAt: record.crossedOffAt ?? null,
       entries: record.entries.map((entry) => ({
         quantityText: entry.quantityText,
         amountValue: entry.amountValue ?? null,
@@ -1373,6 +1474,31 @@ function reorderState(
     }
   });
   return updated ? next : state;
+}
+
+function setCrossedOffFlag(
+  state: ShoppingListState,
+  key: string,
+  crossedOffAt: number | null
+): ShoppingListState {
+  const record = state[key];
+  if (!record) {
+    return state;
+  }
+  const normalizedValue =
+    typeof crossedOffAt === "number" && Number.isFinite(crossedOffAt)
+      ? crossedOffAt
+      : null;
+  if ((record.crossedOffAt ?? null) === normalizedValue) {
+    return state;
+  }
+  return {
+    ...state,
+    [key]: {
+      ...record,
+      crossedOffAt: normalizedValue,
+    },
+  };
 }
 
 function applyQuantityOverrideToState(
@@ -1468,7 +1594,14 @@ function reviveStore(value: unknown): ShoppingListState {
           : key;
       const parsedLabel = parseIngredient(labelSource);
       const label = parsedLabel.label || labelSource;
-      result[key] = { label, entries: hydratedEntries, order: resolveOrder() };
+      result[key] = {
+        label,
+        entries: hydratedEntries,
+        order: resolveOrder(),
+        crossedOffAt: normalizeCrossedOffStamp(
+          (record as Record<string, unknown>).crossedOffAt
+        ),
+      };
       return;
     }
 
@@ -1492,10 +1625,18 @@ function reviveStore(value: unknown): ShoppingListState {
       label: parsed.label,
       entries: entriesArray,
       order: resolveOrder(),
+      crossedOffAt: null,
     };
   });
 
   return result;
+}
+
+function normalizeCrossedOffStamp(value: unknown): number | null {
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return value;
+  }
+  return null;
 }
 
 function reviveEntry(value: unknown): QuantityEntry | null {
@@ -1701,6 +1842,30 @@ function hydrateOfflineMutation(value: unknown): OfflineMutation | null {
         return null;
       }
       return { kind: "UPDATE_QUANTITY", ownerId, label, quantity };
+    }
+    case "SET_CROSSED_OFF": {
+      const label =
+        typeof record.label === "string" && record.label.length
+          ? record.label
+          : null;
+      if (!label) {
+        return null;
+      }
+      if (record.crossedOffAt === null) {
+        return { kind: "SET_CROSSED_OFF", ownerId, label, crossedOffAt: null };
+      }
+      if (
+        typeof record.crossedOffAt === "number" &&
+        Number.isFinite(record.crossedOffAt)
+      ) {
+        return {
+          kind: "SET_CROSSED_OFF",
+          ownerId,
+          label,
+          crossedOffAt: record.crossedOffAt,
+        };
+      }
+      return null;
     }
     default:
       return null;

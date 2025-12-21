@@ -54,14 +54,28 @@ export async function GET() {
       sourceRecipeId: entry.sourceRecipeId ?? undefined,
       sourceRecipeTitle: entry.sourceRecipeTitle ?? undefined,
     };
+    const crossedOffAt = entry.crossedOffAt
+      ? entry.crossedOffAt.getTime()
+      : null;
     if (record) {
       record.entries.push(quantityEntry);
       record.order = Math.min(record.order, entry.sortOrder ?? 0);
+      if (crossedOffAt !== null) {
+        const existingCrossedAt =
+          typeof record.crossedOffAt === "number"
+            ? record.crossedOffAt
+            : null;
+        record.crossedOffAt =
+          existingCrossedAt === null
+            ? crossedOffAt
+            : Math.min(existingCrossedAt, crossedOffAt);
+      }
     } else {
       ownerState[key] = {
         label: entry.label,
         entries: [quantityEntry],
         order: entry.sortOrder ?? 0,
+        crossedOffAt,
       };
     }
   });
@@ -186,10 +200,24 @@ export async function POST(request: Request) {
     sourceRecipeId: meta.recipeId,
     sourceRecipeTitle: meta.recipeTitle,
     sortOrder: orderAssignments.get(parsed.normalizedLabel) ?? 0,
+    crossedOffAt: null,
   }));
 
   try {
-    await prisma.shoppingListEntry.createMany({ data: entriesToCreate });
+    if (uniqueLabels.length) {
+      await prisma.$transaction([
+        prisma.shoppingListEntry.updateMany({
+          where: {
+            ownerId: targetOwnerId,
+            normalizedLabel: { in: uniqueLabels },
+          },
+          data: { crossedOffAt: null, updatedById: user.id },
+        }),
+        prisma.shoppingListEntry.createMany({ data: entriesToCreate }),
+      ]);
+    } else {
+      await prisma.shoppingListEntry.createMany({ data: entriesToCreate });
+    }
     return NextResponse.json({ inserted: entriesToCreate.length }, { status: 201 });
   } catch (error) {
     console.error("Failed to persist shopping list entries", error);
@@ -285,6 +313,8 @@ export async function PUT(request: Request) {
     ? preservedSources.join(" · ")
     : "Manual adjustment";
 
+  const existingCrossedAt = existingEntries[0]?.crossedOffAt ?? null;
+
   if (!existingEntries.length) {
     return NextResponse.json({ error: "Item not found" }, { status: 404 });
   }
@@ -321,6 +351,7 @@ export async function PUT(request: Request) {
           sourceRecipeId: null,
           sourceRecipeTitle: manualSourceTitle,
           sortOrder,
+          crossedOffAt: existingCrossedAt,
         },
       }),
     ]);
@@ -347,16 +378,13 @@ export async function PATCH(request: Request) {
     return NextResponse.json({ error: "Invalid JSON" }, { status: 400 });
   }
 
-  const { order, ownerId } = (payload ?? {}) as {
+  const { order, ownerId, label, storageKey, crossedOffAt } = (payload ?? {}) as {
     order?: unknown;
     ownerId?: unknown;
+    label?: unknown;
+    storageKey?: unknown;
+    crossedOffAt?: unknown;
   };
-  if (!Array.isArray(order) || order.some((item) => typeof item !== "string")) {
-    return NextResponse.json(
-      { error: "order must be an array of labels" },
-      { status: 400 }
-    );
-  }
 
   const targetOwnerId =
     typeof ownerId === "string" && ownerId.trim().length
@@ -367,41 +395,119 @@ export async function PATCH(request: Request) {
     return NextResponse.json({ error: "Forbidden" }, { status: 403 });
   }
 
-  const normalizedOrder = order
-    .map((label) => {
-      const parsed = parseIngredient(label);
-      return parsed.normalizedLabel || normalizeLabel(label);
-    })
-    .filter((label) => Boolean(label)) as string[];
+  if (order !== undefined) {
+    if (!Array.isArray(order) || order.some((item) => typeof item !== "string")) {
+      return NextResponse.json(
+        { error: "order must be an array of labels" },
+        { status: 400 }
+      );
+    }
 
-  if (!normalizedOrder.length) {
+    const normalizedOrder = order
+      .map((entry) => {
+        const parsed = parseIngredient(entry);
+        return parsed.normalizedLabel || normalizeLabel(entry);
+      })
+      .filter((entry) => Boolean(entry)) as string[];
+
+    if (!normalizedOrder.length) {
+      return NextResponse.json(
+        { error: "order must include at least one valid label" },
+        { status: 400 }
+      );
+    }
+
+    const seen = new Set<string>();
+    const deduped = normalizedOrder.filter((entry) => {
+      if (seen.has(entry)) return false;
+      seen.add(entry);
+      return true;
+    });
+
+    try {
+      await prisma.$transaction(
+        deduped.map((entry, index) =>
+          prisma.shoppingListEntry.updateMany({
+            where: { ownerId: targetOwnerId, normalizedLabel: entry },
+            data: { sortOrder: index, updatedById: user.id },
+          })
+        )
+      );
+      return NextResponse.json({ success: true });
+    } catch (error) {
+      console.error("Failed to reorder shopping list", error);
+      return NextResponse.json(
+        { error: "Failed to reorder shopping list" },
+        { status: 500 }
+      );
+    }
+  }
+
+  const rawLabel =
+    (typeof storageKey === "string" && storageKey.trim().length
+      ? storageKey.trim()
+      : null) ??
+    (typeof label === "string" && label.trim().length
+      ? label.trim()
+      : null);
+
+  if (!rawLabel) {
     return NextResponse.json(
-      { error: "order must include at least one valid label" },
+      { error: "label is required when updating crossed-off state" },
       { status: 400 }
     );
   }
 
-  const seen = new Set<string>();
-  const deduped = normalizedOrder.filter((label) => {
-    if (seen.has(label)) return false;
-    seen.add(label);
-    return true;
-  });
+  const parsedLabel = parseIngredient(rawLabel);
+  const normalizedLabel =
+    parsedLabel.normalizedLabel || normalizeLabel(rawLabel);
+  if (!normalizedLabel) {
+    return NextResponse.json(
+      { error: "Unable to resolve shopping list item" },
+      { status: 400 }
+    );
+  }
+
+  let nextCrossedAt: Date | null;
+  if (crossedOffAt === null) {
+    nextCrossedAt = null;
+  } else if (
+    typeof crossedOffAt === "number" &&
+    Number.isFinite(crossedOffAt)
+  ) {
+    nextCrossedAt = new Date(crossedOffAt);
+  } else if (
+    typeof crossedOffAt === "string" &&
+    crossedOffAt.trim().length
+  ) {
+    const parsedDate = new Date(crossedOffAt);
+    if (Number.isNaN(parsedDate.getTime())) {
+      return NextResponse.json(
+        { error: "Invalid crossedOffAt timestamp" },
+        { status: 400 }
+      );
+    }
+    nextCrossedAt = parsedDate;
+  } else {
+    return NextResponse.json(
+      { error: "crossedOffAt must be a timestamp or null" },
+      { status: 400 }
+    );
+  }
 
   try {
-    await prisma.$transaction(
-      deduped.map((label, index) =>
-        prisma.shoppingListEntry.updateMany({
-          where: { ownerId: targetOwnerId, normalizedLabel: label },
-          data: { sortOrder: index, updatedById: user.id },
-        })
-      )
-    );
+    const result = await prisma.shoppingListEntry.updateMany({
+      where: { ownerId: targetOwnerId, normalizedLabel },
+      data: { crossedOffAt: nextCrossedAt, updatedById: user.id },
+    });
+    if (result.count === 0) {
+      return NextResponse.json({ error: "Item not found" }, { status: 404 });
+    }
     return NextResponse.json({ success: true });
   } catch (error) {
-    console.error("Failed to reorder shopping list", error);
+    console.error("Failed to update crossed-off state", error);
     return NextResponse.json(
-      { error: "Failed to reorder shopping list" },
+      { error: "Failed to update crossed-off state" },
       { status: 500 }
     );
   }
