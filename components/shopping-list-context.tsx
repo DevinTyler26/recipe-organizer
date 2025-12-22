@@ -952,6 +952,11 @@ export function ShoppingListProvider({ children }: { children: ReactNode }) {
       const targetOwnerId = resolveOwnerId(ownerOverride);
       if (!targetOwnerId) return;
 
+      if (targetOwnerId === LOCAL_OWNER_ID) {
+        setLocalStore((current) => removeItemFromState(current, key));
+        return;
+      }
+
       if (!isClientOnline) {
         const didUpdate = applyOwnerStateMutation(targetOwnerId, (state) =>
           removeItemFromState(state, key)
@@ -965,6 +970,23 @@ export function ShoppingListProvider({ children }: { children: ReactNode }) {
         }
         return;
       }
+
+      commitRemoteLists((current) => {
+        let changed = false;
+        const next = current.map((list) => {
+          if (list.ownerId !== targetOwnerId) {
+            return list;
+          }
+          const updatedState = removeItemFromState(list.state, key);
+          if (updatedState === list.state) {
+            return list;
+          }
+          changed = true;
+          return { ...list, state: updatedState };
+        });
+        return changed ? next : current;
+      });
+
       const params = new URLSearchParams({
         label: key,
         ownerId: targetOwnerId,
@@ -979,11 +1001,13 @@ export function ShoppingListProvider({ children }: { children: ReactNode }) {
     },
     [
       applyOwnerStateMutation,
+      commitRemoteLists,
       isAuthenticated,
       isClientOnline,
       queueOfflineMutation,
       resolveOwnerId,
       runRemoteMutation,
+      setLocalStore,
     ]
   );
 
