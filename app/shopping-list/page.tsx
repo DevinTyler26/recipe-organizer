@@ -917,7 +917,7 @@ export default function ShoppingListPage() {
       dragHandleProps: SortableRenderProps["dragHandleProps"] = null,
       isDragging = false
     ) => {
-      const cardClasses = `flex items-center gap-3 rounded-[28px] border px-4 py-3 text-sm shadow-sm transition-all duration-300 ease-out ${
+      const cardClasses = `flex select-none items-center gap-3 rounded-[28px] border px-4 py-3 text-sm shadow-sm transition-all duration-300 ease-out ${
         isDragging
           ? "border-rose-200 bg-rose-50/90 opacity-80 ring-2 ring-rose-100"
           : isCrossed
