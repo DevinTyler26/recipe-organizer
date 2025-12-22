@@ -4,14 +4,31 @@ import Link from "next/link";
 import { signIn, useSession } from "next-auth/react";
 import { AnimatePresence, motion, type Transition } from "framer-motion";
 import {
+  DndContext,
+  KeyboardSensor,
+  PointerSensor,
+  closestCenter,
+  useSensor,
+  useSensors,
+  type DragEndEvent,
+} from "@dnd-kit/core";
+import {
+  SortableContext,
+  arrayMove,
+  sortableKeyboardCoordinates,
+  useSortable,
+  verticalListSortingStrategy,
+} from "@dnd-kit/sortable";
+import { CSS } from "@dnd-kit/utilities";
+import {
   useCallback,
   useEffect,
   useMemo,
   useRef,
   useState,
-  type DragEvent,
   type FormEvent,
   type ReactNode,
+  type CSSProperties,
   type TouchEvent,
 } from "react";
 import { AppNav } from "@/components/app-nav";
@@ -80,6 +97,44 @@ type SwipePreviewState = {
 
 const clamp = (value: number, min: number, max: number) =>
   Math.min(max, Math.max(min, value));
+
+type SortableRenderProps = {
+  ref: (node: HTMLLIElement | null) => void;
+  style: CSSProperties;
+  dragHandleProps: Record<string, unknown> | null;
+  isDragging: boolean;
+};
+
+const SortableListItem = ({
+  item,
+  children,
+}: {
+  item: ShoppingListItem;
+  children: (props: SortableRenderProps) => ReactNode;
+}) => {
+  const {
+    attributes,
+    listeners,
+    setNodeRef,
+    transform,
+    transition,
+    isDragging,
+  } = useSortable({ id: item.storageKey });
+  const style: CSSProperties = {
+    transform: CSS.Transform.toString(transform),
+    transition,
+  };
+  const dragHandleProps = { ...attributes, ...listeners } as Record<
+    string,
+    unknown
+  >;
+  return children({
+    ref: setNodeRef,
+    style,
+    dragHandleProps,
+    isDragging,
+  });
+};
 
 const guessStructuredFields = (summary: string) => {
   const trimmed = summary.trim();
@@ -237,7 +292,6 @@ export default function ShoppingListPage() {
   } = useShoppingList();
   const { showToast } = useToast();
   const { refreshCollaborations } = useCollaborationUI();
-  const [draggingKey, setDraggingKey] = useState<string | null>(null);
   const [quantityEditor, setQuantityEditor] =
     useState<QuantityEditorState | null>(null);
   const [quantityError, setQuantityError] = useState<string | null>(null);
@@ -264,50 +318,48 @@ export default function ShoppingListPage() {
     lists.find((list) => list.ownerId === selectedListId) ?? lists[0] ?? null;
   const activeOwnerId = activeList?.ownerId ?? null;
   const emptyState = items.length === 0;
-  const beginDrag = (key: string, event: DragEvent<HTMLLIElement>) => {
-    setDraggingKey(key);
-    event.dataTransfer.effectAllowed = "move";
-    event.dataTransfer.setData("text/plain", key);
-  };
+  const sensors = useSensors(
+    useSensor(PointerSensor, {
+      activationConstraint: { delay: 120, tolerance: 8 },
+    }),
+    useSensor(KeyboardSensor, {
+      coordinateGetter: sortableKeyboardCoordinates,
+    })
+  );
 
-  const finalizeDrag = () => {
-    setDraggingKey(null);
-  };
-
-  const reorderRelative = (targetKey: string | null, placeAfter: boolean) => {
-    if (!draggingKey || !activeOwnerId) return;
-    const orderedKeys = items
-      .map((item) => item.storageKey)
-      .filter((key) => key !== draggingKey);
-    if (targetKey === null) {
-      orderedKeys.push(draggingKey);
-    } else {
-      const targetIndex = orderedKeys.indexOf(targetKey);
-      if (targetIndex === -1) return;
-      const insertIndex = targetIndex + (placeAfter ? 1 : 0);
-      orderedKeys.splice(insertIndex, 0, draggingKey);
+  const sortableActiveKeys = useMemo(() => {
+    if (!activeOwnerId) {
+      return [];
     }
-    reorderItems(orderedKeys, activeOwnerId);
-    finalizeDrag();
-  };
+    return items
+      .filter((item) => item.ownerId === activeOwnerId && !item.crossedOffAt)
+      .map((item) => item.storageKey);
+  }, [activeOwnerId, items]);
 
-  const handleItemDrop = (
-    event: DragEvent<HTMLLIElement>,
-    targetKey: string
-  ) => {
-    event.preventDefault();
-    if (!draggingKey) return;
-    const rect = event.currentTarget.getBoundingClientRect();
-    const shouldPlaceAfter = event.clientY > rect.top + rect.height / 2;
-    reorderRelative(targetKey, shouldPlaceAfter);
-  };
-
-  const handleListDrop = (event: DragEvent<HTMLUListElement>) => {
-    if (event.target !== event.currentTarget) return;
-    event.preventDefault();
-    if (!draggingKey) return;
-    reorderRelative(null, true);
-  };
+  const handleDragEnd = useCallback(
+    ({ active, over }: DragEndEvent) => {
+      if (!activeOwnerId || !over || active.id === over.id) {
+        return;
+      }
+      const ownerItems = items.filter(
+        (entry) => entry.ownerId === activeOwnerId
+      );
+      const activeKeys = ownerItems
+        .filter((entry) => !entry.crossedOffAt)
+        .map((entry) => entry.storageKey);
+      const fromIndex = activeKeys.indexOf(active.id as string);
+      const toIndex = activeKeys.indexOf(over.id as string);
+      if (fromIndex === -1 || toIndex === -1) {
+        return;
+      }
+      const nextActive = arrayMove(activeKeys, fromIndex, toIndex);
+      const crossedKeys = ownerItems
+        .filter((entry) => entry.crossedOffAt)
+        .map((entry) => entry.storageKey);
+      reorderItems([...nextActive, ...crossedKeys], activeOwnerId);
+    },
+    [activeOwnerId, items, reorderItems]
+  );
 
   useEffect(() => {
     void refreshCollaborations();
@@ -849,6 +901,7 @@ export default function ShoppingListPage() {
     : null;
 
   const renderListItem = (item: ShoppingListItem) => {
+    const layoutKey = `${item.ownerId}:${item.storageKey}`;
     const isCrossed = Boolean(item.crossedOffAt);
     const isSwipeTarget = swipePreview.key === item.storageKey;
     const swipeOffset = clamp(
@@ -859,129 +912,164 @@ export default function ShoppingListPage() {
     const isSwipeActive = isSwipeTarget && swipePreview.isActive;
     const swipeBackdropVisible =
       isSwipeTarget && Math.abs(swipePreview.deltaX) > 4;
-    const cardClasses = `flex items-center gap-3 rounded-[28px] border px-4 py-3 text-sm shadow-sm transition-all duration-300 ease-out ${
-      draggingKey === item.storageKey
-        ? "border-rose-200 bg-rose-50/90 opacity-80 ring-2 ring-rose-100"
-        : isCrossed
-        ? "border-slate-100 bg-white/80 opacity-70"
-        : "border-sky-100 bg-gradient-to-br from-white via-sky-50/80 to-white hover:shadow-md"
-    }`;
 
-    return (
-      <motion.li
-        layout
-        layoutId={`${item.ownerId}:${item.storageKey}`}
-        transition={LIST_LAYOUT_TRANSITION}
-        initial={false}
-        exit={{ opacity: 0, scale: 0.95 }}
-        key={item.storageKey}
-        draggable
-        onDragStart={(event) =>
-          beginDrag(
-            item.storageKey,
-            event as unknown as DragEvent<HTMLLIElement>
-          )
+    const renderCard = (
+      dragHandleProps: SortableRenderProps["dragHandleProps"] = null,
+      isDragging = false
+    ) => {
+      const cardClasses = `flex items-center gap-3 rounded-[28px] border px-4 py-3 text-sm shadow-sm transition-all duration-300 ease-out ${
+        isDragging
+          ? "border-rose-200 bg-rose-50/90 opacity-80 ring-2 ring-rose-100"
+          : isCrossed
+          ? "border-slate-100 bg-white/80 opacity-70"
+          : "border-sky-100 bg-gradient-to-br from-white via-sky-50/80 to-white hover:shadow-md"
+      }`;
+      const resolvedHandleProps = (() => {
+        if (!dragHandleProps) {
+          return null;
         }
-        onDragOver={(event) => {
-          const dragEvent = event as unknown as DragEvent<HTMLLIElement>;
-          dragEvent.preventDefault();
-          dragEvent.dataTransfer.dropEffect = "move";
-        }}
-        onDrop={(event) =>
-          handleItemDrop(
-            event as unknown as DragEvent<HTMLLIElement>,
-            item.storageKey
-          )
-        }
-        onDragEnd={() => finalizeDrag()}
-        aria-grabbed={draggingKey === item.storageKey}
-        className="relative"
-      >
-        <div
-          className={`pointer-events-none absolute inset-0 flex select-none items-center rounded-[32px] bg-gradient-to-r from-emerald-50 via-white to-rose-50 px-5 transition-opacity ${
-            swipeBackdropVisible ? "opacity-100" : "opacity-0"
-          }`}
-        >
-          <div className="flex flex-1 items-center text-2xl text-emerald-500">
-            ✓
-          </div>
-          <div className="flex flex-1 items-center justify-end text-2xl text-rose-500">
-            ✕
-          </div>
-        </div>
-        <div
-          className={`${cardClasses} relative z-10`}
-          style={{
-            transform: `translateX(${swipeOffset}px)`,
-            transition: isSwipeActive ? "none" : "transform 0.2s ease",
-            touchAction: isSwipeActive ? "none" : "pan-y",
-          }}
-          onTouchStart={(event) => handleSwipeStart(event, item)}
-          onTouchMove={(event) => handleSwipeMove(event, item)}
-          onTouchEnd={() => handleSwipeEnd(item)}
-          onTouchCancel={() => handleSwipeCancel(item)}
-        >
-          <button
-            type="button"
-            aria-pressed={isCrossed}
-            aria-label={
-              isCrossed
-                ? `Restore ${item.label} to the active list`
-                : `Cross off ${item.label}`
-            }
-            onClick={(event) =>
-              handleCrossToggle(item, !isCrossed, event.currentTarget)
-            }
-            className={`flex h-10 w-10 items-center justify-center rounded-full border-2 text-lg font-semibold transition ${
-              isCrossed
-                ? "border-emerald-300 bg-emerald-50 text-emerald-600"
-                : "border-slate-300 bg-white text-slate-300 hover:border-emerald-300 hover:text-emerald-500"
+        const { style: handleStyle, ...rest } = dragHandleProps as {
+          style?: CSSProperties;
+        };
+        return {
+          ...rest,
+          style: { ...(handleStyle ?? {}), touchAction: "none" },
+        } as Record<string, unknown>;
+      })();
+
+      return (
+        <>
+          <div
+            className={`pointer-events-none absolute inset-0 flex select-none items-center rounded-[32px] bg-gradient-to-r from-emerald-50 via-white to-rose-50 px-5 transition-opacity ${
+              swipeBackdropVisible ? "opacity-100" : "opacity-0"
             }`}
           >
-            <span className={isCrossed ? "opacity-100" : "opacity-0"}>✓</span>
-          </button>
-          <div className="flex flex-1 flex-col gap-[6px]">
-            <p
-              className={`text-sm font-semibold ${
-                isCrossed ? "text-slate-400 line-through" : "text-slate-900"
-              }`}
-            >
-              {item.label}
-            </p>
-            <div className="flex flex-wrap items-center gap-2 text-xs text-slate-500">
-              <button
-                type="button"
-                onClick={() =>
-                  beginQuantityEdit(item.storageKey, item.unitSummary)
-                }
-                className={`inline-flex items-center rounded-full border px-3 py-1 text-[10px] font-semibold uppercase tracking-[0.3em] transition ${
-                  isCrossed
-                    ? "border-slate-200 text-slate-300"
-                    : "border-slate-300 text-slate-600 hover:border-slate-400 hover:text-slate-900"
-                }`}
-                title="Adjust quantity"
-              >
-                {item.unitSummary}
-              </button>
-              {quantityEditor?.key === item.storageKey && (
-                <span className="rounded-full border border-sky-200 bg-sky-50 px-3 py-1 text-[10px] font-semibold uppercase tracking-[0.3em] text-sky-600">
-                  Editing…
-                </span>
-              )}
+            <div className="flex flex-1 items-center text-2xl text-emerald-500">
+              ✓
+            </div>
+            <div className="flex flex-1 items-center justify-end text-2xl text-rose-500">
+              ✕
             </div>
           </div>
-          <div className="flex items-center gap-2 self-stretch">
+          <div
+            className={`${cardClasses} relative z-10`}
+            style={{
+              transform: `translateX(${swipeOffset}px)`,
+              transition: isSwipeActive ? "none" : "transform 0.2s ease",
+              touchAction: isSwipeActive ? "none" : "pan-y",
+            }}
+            onTouchStart={(event) => handleSwipeStart(event, item)}
+            onTouchMove={(event) => handleSwipeMove(event, item)}
+            onTouchEnd={() => handleSwipeEnd(item)}
+            onTouchCancel={() => handleSwipeCancel(item)}
+          >
             <button
               type="button"
-              onClick={() => handleDeleteItem(item)}
-              className="rounded-full p-2 text-slate-400 transition hover:bg-rose-50 hover:text-rose-600"
-              aria-label={`Delete ${item.label}`}
+              aria-pressed={isCrossed}
+              aria-label={
+                isCrossed
+                  ? `Restore ${item.label} to the active list`
+                  : `Cross off ${item.label}`
+              }
+              onClick={(event) =>
+                handleCrossToggle(item, !isCrossed, event.currentTarget)
+              }
+              className={`flex h-10 w-10 items-center justify-center rounded-full border-2 text-lg font-semibold transition ${
+                isCrossed
+                  ? "border-emerald-300 bg-emerald-50 text-emerald-600"
+                  : "border-slate-300 bg-white text-slate-300 hover:border-emerald-300 hover:text-emerald-500"
+              }`}
             >
-              ✕
+              <span className={isCrossed ? "opacity-100" : "opacity-0"}>✓</span>
             </button>
+            <div className="flex flex-1 flex-col gap-[6px]">
+              <p
+                className={`text-sm font-semibold ${
+                  isCrossed ? "text-slate-400 line-through" : "text-slate-900"
+                }`}
+              >
+                {item.label}
+              </p>
+              <div className="flex flex-wrap items-center gap-2 text-xs text-slate-500">
+                <button
+                  type="button"
+                  onClick={() =>
+                    beginQuantityEdit(item.storageKey, item.unitSummary)
+                  }
+                  className={`inline-flex items-center rounded-full border px-3 py-1 text-[10px] font-semibold uppercase tracking-[0.3em] transition ${
+                    isCrossed
+                      ? "border-slate-200 text-slate-300"
+                      : "border-slate-300 text-slate-600 hover:border-slate-400 hover:text-slate-900"
+                  }`}
+                  title="Adjust quantity"
+                >
+                  {item.unitSummary}
+                </button>
+                {quantityEditor?.key === item.storageKey && (
+                  <span className="rounded-full border border-sky-200 bg-sky-50 px-3 py-1 text-[10px] font-semibold uppercase tracking-[0.3em] text-sky-600">
+                    Editing…
+                  </span>
+                )}
+              </div>
+            </div>
+            <div className="flex items-center gap-2 self-stretch">
+              {!isCrossed && resolvedHandleProps && (
+                <button
+                  type="button"
+                  aria-label={`Reorder ${item.label}`}
+                  className="rounded-full p-2 text-slate-400 transition hover:bg-slate-100 hover:text-slate-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-slate-400"
+                  {...resolvedHandleProps}
+                >
+                  ⠿
+                </button>
+              )}
+              <button
+                type="button"
+                onClick={() => handleDeleteItem(item)}
+                className="rounded-full p-2 text-slate-400 transition hover:bg-rose-50 hover:text-rose-600"
+                aria-label={`Delete ${item.label}`}
+              >
+                ✕
+              </button>
+            </div>
           </div>
-        </div>
-      </motion.li>
+        </>
+      );
+    };
+
+    if (isCrossed) {
+      return (
+        <motion.li
+          layout
+          layoutId={layoutKey}
+          transition={LIST_LAYOUT_TRANSITION}
+          initial={false}
+          exit={{ opacity: 0, scale: 0.95 }}
+          key={item.storageKey}
+          className="relative"
+        >
+          {renderCard()}
+        </motion.li>
+      );
+    }
+
+    return (
+      <SortableListItem key={item.storageKey} item={item}>
+        {({ ref, style, dragHandleProps, isDragging }) => (
+          <motion.li
+            layout={!isDragging}
+            layoutId={isDragging ? undefined : layoutKey}
+            transition={isDragging ? { duration: 0 } : LIST_LAYOUT_TRANSITION}
+            initial={false}
+            exit={{ opacity: 0, scale: 0.95 }}
+            className="relative"
+            ref={ref}
+            style={style}
+          >
+            {renderCard(dragHandleProps, isDragging)}
+          </motion.li>
+        )}
+      </SortableListItem>
     );
   };
 
@@ -1147,20 +1235,22 @@ export default function ShoppingListPage() {
                 <p className="text-lg font-medium">Syncing your list…</p>
               </div>
             ) : (
-              <ul
-                className="space-y-3"
-                onDragOver={(event) => {
-                  if (event.target === event.currentTarget) {
-                    event.preventDefault();
-                    event.dataTransfer.dropEffect = "move";
-                  }
-                }}
-                onDrop={handleListDrop}
+              <DndContext
+                sensors={sensors}
+                collisionDetection={closestCenter}
+                onDragEnd={handleDragEnd}
               >
-                <AnimatePresence initial={false} mode="sync">
-                  {listElements}
-                </AnimatePresence>
-              </ul>
+                <SortableContext
+                  items={sortableActiveKeys}
+                  strategy={verticalListSortingStrategy}
+                >
+                  <ul className="space-y-3">
+                    <AnimatePresence initial={false} mode="sync">
+                      {listElements}
+                    </AnimatePresence>
+                  </ul>
+                </SortableContext>
+              </DndContext>
             )}
           </div>
         </section>
