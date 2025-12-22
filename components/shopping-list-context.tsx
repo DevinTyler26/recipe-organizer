@@ -102,7 +102,7 @@ type RemoteMutationResult =
   | { success: false; error: Error };
 
 type DeferredRemoteMutation = {
-  action: () => Promise<Response>;
+  operation: OfflineMutation;
   ownerScope?: string | null;
   resolve: (result: RemoteMutationResult) => void;
 };
@@ -668,11 +668,14 @@ export function ShoppingListProvider({ children }: { children: ReactNode }) {
     };
   }, [isAuthenticated, isClientOnline, scheduleRemoteRefresh]);
 
-  const executeRemoteMutation = useCallback(
+  const dispatchRemoteMutationBatch = useCallback(
     async (
-      action: () => Promise<Response>,
-      ownerScope?: string | null
+      operations: OfflineMutation[],
+      ownerScopes: string[]
     ): Promise<RemoteMutationResult> => {
+      if (!operations.length) {
+        return { success: true } as const;
+      }
       if (!isAuthenticated) {
         return {
           success: false,
@@ -681,7 +684,11 @@ export function ShoppingListProvider({ children }: { children: ReactNode }) {
       }
       setIsSyncing(true);
       try {
-        const response = await action();
+        const response = await fetch("/api/shopping-list/batch", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ operations }),
+        });
         if (!response.ok) {
           const body = (await response.json().catch(() => null)) as {
             error?: string;
@@ -689,9 +696,7 @@ export function ShoppingListProvider({ children }: { children: ReactNode }) {
           throw new Error(body?.error ?? "Shopping list request failed");
         }
         scheduleRemoteRefresh();
-        if (ownerScope) {
-          recordRecentMutation(ownerScope);
-        }
+        ownerScopes.forEach((ownerId) => recordRecentMutation(ownerId));
         return { success: true } as const;
       } catch (error) {
         console.error("Shopping list sync failed", error);
@@ -703,9 +708,9 @@ export function ShoppingListProvider({ children }: { children: ReactNode }) {
               : new Error("Shopping list sync failed"),
         } as const;
       } finally {
-        if (ownerScope) {
-          pendingOwnerMutationsRef.current.delete(ownerScope);
-        }
+        ownerScopes.forEach((ownerId) => {
+          pendingOwnerMutationsRef.current.delete(ownerId);
+        });
         setIsSyncing(false);
       }
     },
@@ -718,11 +723,17 @@ export function ShoppingListProvider({ children }: { children: ReactNode }) {
     }
     const pending = [...deferredMutationsRef.current];
     deferredMutationsRef.current = [];
-    for (const entry of pending) {
-      const result = await executeRemoteMutation(entry.action, entry.ownerScope);
-      entry.resolve(result);
-    }
-  }, [executeRemoteMutation]);
+    const operations = pending.map((entry) => entry.operation);
+    const ownerScopes = Array.from(
+      new Set(
+        pending
+          .map((entry) => entry.ownerScope)
+          .filter((value): value is string => Boolean(value))
+      )
+    );
+    const result = await dispatchRemoteMutationBatch(operations, ownerScopes);
+    pending.forEach((entry) => entry.resolve(result));
+  }, [dispatchRemoteMutationBatch]);
 
   const scheduleDeferredMutationFlush = useCallback(() => {
     if (typeof window === "undefined") {
@@ -740,20 +751,20 @@ export function ShoppingListProvider({ children }: { children: ReactNode }) {
   }, [flushDeferredMutations]);
 
   const runRemoteMutation = useCallback(
-    (action: () => Promise<Response>, ownerScope?: string | null) => {
+    (operation: OfflineMutation) => {
       if (!isAuthenticated) {
         return Promise.resolve({
           success: false,
           error: new Error("You need to sign in to sync this list"),
         } as const);
       }
-      if (ownerScope) {
-        pendingOwnerMutationsRef.current.set(ownerScope, Date.now());
+      if (operation.ownerId) {
+        pendingOwnerMutationsRef.current.set(operation.ownerId, Date.now());
       }
       return new Promise<RemoteMutationResult>((resolve) => {
         deferredMutationsRef.current.push({
-          action,
-          ownerScope,
+          operation,
+          ownerScope: operation.ownerId,
           resolve,
         });
         scheduleDeferredMutationFlush();
@@ -833,112 +844,27 @@ export function ShoppingListProvider({ children }: { children: ReactNode }) {
     [commitRemoteLists, currentUserId, derivedSelfDisplayName, selfListLabel]
   );
 
-  const executeOfflineMutation = useCallback(
-    (mutation: OfflineMutation) => {
-      switch (mutation.kind) {
-        case "ADD_ITEMS":
-          return runRemoteMutation(
-            () =>
-              fetch("/api/shopping-list", {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({
-                  ingredients: mutation.ingredients,
-                  ownerId: mutation.ownerId,
-                  position: mutation.position,
-                }),
-              }),
-            mutation.ownerId
-          );
-        case "REMOVE_ITEM": {
-          const params = new URLSearchParams({
-            label: mutation.label,
-            ownerId: mutation.ownerId,
-          });
-          return runRemoteMutation(
-            () =>
-              fetch(`/api/shopping-list?${params.toString()}`, {
-                method: "DELETE",
-              }),
-            mutation.ownerId
-          );
-        }
-        case "CLEAR_LIST": {
-          const params = new URLSearchParams({ ownerId: mutation.ownerId });
-          return runRemoteMutation(
-            () =>
-              fetch(`/api/shopping-list?${params.toString()}`, {
-                method: "DELETE",
-              }),
-            mutation.ownerId
-          );
-        }
-        case "REORDER_ITEMS":
-          return runRemoteMutation(
-            () =>
-              fetch("/api/shopping-list", {
-                method: "PATCH",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({
-                  order: mutation.order,
-                  ownerId: mutation.ownerId,
-                }),
-              }),
-            mutation.ownerId
-          );
-        case "UPDATE_QUANTITY":
-          return runRemoteMutation(
-            () =>
-              fetch("/api/shopping-list", {
-                method: "PUT",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({
-                  ownerId: mutation.ownerId,
-                  label: mutation.label,
-                  quantity: mutation.quantity,
-                }),
-              }),
-            mutation.ownerId
-          );
-        case "SET_CROSSED_OFF":
-          return runRemoteMutation(
-            () =>
-              fetch("/api/shopping-list", {
-                method: "PATCH",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({
-                  ownerId: mutation.ownerId,
-                  label: mutation.label,
-                  crossedOffAt: mutation.crossedOffAt,
-                }),
-              }),
-            mutation.ownerId
-          );
-        default:
-          return Promise.resolve({ success: true } as const);
-      }
-    },
-    [runRemoteMutation]
-  );
-
   const flushOfflineMutations = useCallback(async () => {
     if (!offlineMutationsRef.current.length) {
       return;
     }
     const pending = [...offlineMutationsRef.current];
     updateOfflineQueue([]);
-    for (let index = 0; index < pending.length; index += 1) {
-      const mutation = pending[index];
-      const result = await executeOfflineMutation(mutation);
-      if (!result?.success) {
-        updateOfflineQueue(pending.slice(index));
-        return;
-      }
+    const ownerScopes = Array.from(
+      new Set(pending.map((mutation) => mutation.ownerId))
+    );
+    ownerScopes.forEach((ownerId) => {
+      pendingOwnerMutationsRef.current.set(ownerId, Date.now());
+    });
+    const result = await dispatchRemoteMutationBatch(pending, ownerScopes);
+    if (!result.success) {
+      updateOfflineQueue(pending);
+      return;
     }
     await backgroundRefreshRemoteLists();
   }, [
     backgroundRefreshRemoteLists,
-    executeOfflineMutation,
+    dispatchRemoteMutationBatch,
     updateOfflineQueue,
   ]);
 
@@ -1008,19 +934,12 @@ export function ShoppingListProvider({ children }: { children: ReactNode }) {
         addIngredientsToState(state, ingredients, options?.position)
       );
 
-      void runRemoteMutation(
-        () =>
-          fetch("/api/shopping-list", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-              ingredients,
-              ownerId: targetOwnerId,
-              position: options?.position,
-            }),
-          }),
-        targetOwnerId
-      );
+      void runRemoteMutation({
+        kind: "ADD_ITEMS",
+        ownerId: targetOwnerId,
+        ingredients,
+        position: options?.position,
+      });
     },
     [
       applyOwnerStateMutation,
@@ -1079,17 +998,11 @@ export function ShoppingListProvider({ children }: { children: ReactNode }) {
         return changed ? next : current;
       });
 
-      const params = new URLSearchParams({
-        label: key,
+      void runRemoteMutation({
+        kind: "REMOVE_ITEM",
         ownerId: targetOwnerId,
+        label: key,
       });
-      void runRemoteMutation(
-        () =>
-          fetch(`/api/shopping-list?${params.toString()}`, {
-            method: "DELETE",
-          }),
-        targetOwnerId
-      );
     },
     [
       applyOwnerStateMutation,
@@ -1146,14 +1059,10 @@ export function ShoppingListProvider({ children }: { children: ReactNode }) {
         });
         return changed ? next : current;
       });
-      const params = new URLSearchParams({ ownerId: targetOwnerId });
-      void runRemoteMutation(
-        () =>
-          fetch(`/api/shopping-list?${params.toString()}`, {
-            method: "DELETE",
-          }),
-        targetOwnerId
-      );
+      void runRemoteMutation({
+        kind: "CLEAR_LIST",
+        ownerId: targetOwnerId,
+      });
     },
     [
       applyOwnerStateMutation,
@@ -1219,18 +1128,11 @@ export function ShoppingListProvider({ children }: { children: ReactNode }) {
         return changed ? next : current;
       });
 
-      void runRemoteMutation(
-        () =>
-          fetch("/api/shopping-list", {
-            method: "PATCH",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-              order: orderedKeys,
-              ownerId: targetOwnerId,
-            }),
-          }),
-        targetOwnerId
-      );
+      void runRemoteMutation({
+        kind: "REORDER_ITEMS",
+        ownerId: targetOwnerId,
+        order: orderedKeys,
+      });
     },
     [
       applyOwnerStateMutation,
@@ -1292,19 +1194,12 @@ export function ShoppingListProvider({ children }: { children: ReactNode }) {
         return changed ? next : current;
       });
 
-      void runRemoteMutation(
-        () =>
-          fetch("/api/shopping-list", {
-            method: "PATCH",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-              ownerId: targetOwnerId,
-              label: key,
-              crossedOffAt: timestamp,
-            }),
-          }),
-        targetOwnerId
-      );
+      void runRemoteMutation({
+        kind: "SET_CROSSED_OFF",
+        ownerId: targetOwnerId,
+        label: key,
+        crossedOffAt: timestamp,
+      });
     },
     [
       applyOwnerStateMutation,
@@ -1408,19 +1303,12 @@ export function ShoppingListProvider({ children }: { children: ReactNode }) {
         })
       );
 
-      const result = await runRemoteMutation(
-        () =>
-          fetch("/api/shopping-list", {
-            method: "PUT",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-              ownerId: targetOwnerId,
-              label: key,
-              quantity: quantityText,
-            }),
-          }),
-        targetOwnerId
-      );
+      const result = await runRemoteMutation({
+        kind: "UPDATE_QUANTITY",
+        ownerId: targetOwnerId,
+        label: key,
+        quantity: quantityText,
+      });
 
       if (!result.success) {
         commitRemoteLists(previousLists);
