@@ -53,6 +53,7 @@ type StoredRecipe = {
 
 const STARTER_UPDATED_AT = "2024-01-01T00:00:00.000Z";
 const RECIPE_REFRESH_INTERVAL_MS = 12_000;
+const RECIPE_ORDER_SYNC_DELAY_MS = 8_000;
 
 const starterRecipes: Recipe[] = [
   {
@@ -360,6 +361,7 @@ export default function HomePage() {
   const offlineRecipeQueueFlushInFlightRef = useRef(false);
   const liveUpdatesSourceRef = useRef<EventSource | null>(null);
   const pendingReorderRef = useRef<string[] | null>(null);
+  const recipeOrderSyncTimerRef = useRef<number | null>(null);
   const updateOfflineRecipeQueue = useCallback(
     (mutations: OfflineRecipeMutation[]) => {
       offlineRecipeMutationsRef.current = mutations;
@@ -388,6 +390,12 @@ export default function HomePage() {
     },
     [updateOfflineRecipeQueue]
   );
+  const clearRecipeOrderSyncTimer = useCallback(() => {
+    if (recipeOrderSyncTimerRef.current !== null) {
+      window.clearTimeout(recipeOrderSyncTimerRef.current);
+      recipeOrderSyncTimerRef.current = null;
+    }
+  }, []);
   const currentUserId = session?.user?.id ?? null;
   const orderedRecipes = useMemo(
     () => [...recipes].sort((a, b) => a.order - b.order),
@@ -620,6 +628,33 @@ export default function HomePage() {
     },
     [isAuthenticated, showToast]
   );
+  const scheduleRecipeOrderSync = useCallback(
+    (orderedIds: string[]) => {
+      const idsToSync = [...orderedIds];
+      pendingReorderRef.current = idsToSync;
+      persistPendingRecipeOrder(idsToSync);
+      if (!isAuthenticated) {
+        return;
+      }
+      if (!isClientOnline) {
+        queueOfflineReorder(idsToSync);
+        clearRecipeOrderSyncTimer();
+        return;
+      }
+      clearRecipeOrderSyncTimer();
+      recipeOrderSyncTimerRef.current = window.setTimeout(() => {
+        recipeOrderSyncTimerRef.current = null;
+        void persistRecipeOrder(idsToSync);
+      }, RECIPE_ORDER_SYNC_DELAY_MS);
+    },
+    [
+      clearRecipeOrderSyncTimer,
+      isAuthenticated,
+      isClientOnline,
+      persistRecipeOrder,
+      queueOfflineReorder,
+    ]
+  );
 
   const flushOfflineRecipeQueue = useCallback(async () => {
     if (
@@ -748,6 +783,34 @@ export default function HomePage() {
   useEffect(() => {
     void refreshCollaborations();
   }, [isAuthenticated, refreshCollaborations]);
+
+  useEffect(() => {
+    if (isAuthenticated) {
+      return;
+    }
+    clearRecipeOrderSyncTimer();
+  }, [clearRecipeOrderSyncTimer, isAuthenticated]);
+
+  useEffect(() => {
+    if (!isAuthenticated || isClientOnline) {
+      return;
+    }
+    if (pendingReorderRef.current?.length) {
+      queueOfflineReorder(pendingReorderRef.current);
+    }
+    clearRecipeOrderSyncTimer();
+  }, [
+    clearRecipeOrderSyncTimer,
+    isAuthenticated,
+    isClientOnline,
+    queueOfflineReorder,
+  ]);
+
+  useEffect(() => {
+    return () => {
+      clearRecipeOrderSyncTimer();
+    };
+  }, [clearRecipeOrderSyncTimer]);
 
   useEffect(() => {
     if (typeof window === "undefined") {
@@ -1618,27 +1681,17 @@ export default function HomePage() {
           order: index,
         }));
         nextOrderIds = next.map((recipe) => recipe.id);
-        pendingReorderRef.current = nextOrderIds;
-        persistPendingRecipeOrder(nextOrderIds);
         return next;
       });
-      const orderedIds = nextOrderIds;
-      if (isAuthenticated && orderedIds.length > 0) {
-        if (isClientOnline) {
-          void persistRecipeOrder(orderedIds);
-        } else {
-          queueOfflineReorder(orderedIds);
-        }
+      if (nextOrderIds.length > 0) {
+        scheduleRecipeOrderSync(nextOrderIds);
       }
       finalizeRecipeDrag();
     },
     [
       draggingRecipeId,
       finalizeRecipeDrag,
-      isAuthenticated,
-      isClientOnline,
-      persistRecipeOrder,
-      queueOfflineReorder,
+      scheduleRecipeOrderSync,
     ]
   );
 
