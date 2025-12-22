@@ -1,4 +1,4 @@
-import type { Metadata } from "next";
+import type { Metadata, Viewport } from "next";
 import { Geist, Geist_Mono } from "next/font/google";
 import { ShoppingListProvider } from "@/components/shopping-list-context";
 import { AuthSessionProvider } from "@/components/session-provider";
@@ -21,7 +21,6 @@ export const metadata: Metadata = {
   description:
     "Keep track of your favorite dishes and build a sharable shopping list",
   manifest: "/manifest.webmanifest",
-  themeColor: "#0f172a",
   icons: {
     icon: [
       {
@@ -58,6 +57,14 @@ export const metadata: Metadata = {
   other: {
     "msapplication-TileColor": "#0f172a",
   },
+};
+
+export const viewport: Viewport = {
+  width: "device-width",
+  initialScale: 1,
+  maximumScale: 1,
+  userScalable: false,
+  themeColor: "#0f172a",
 };
 
 export default function RootLayout({
