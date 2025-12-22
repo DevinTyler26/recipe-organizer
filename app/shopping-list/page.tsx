@@ -55,6 +55,7 @@ const SWIPE_TRIGGER_THRESHOLD = 64;
 const SWIPE_MAX_OFFSET = 120;
 const INTERACTIVE_SWIPE_SELECTOR =
   "button, a, input, textarea, select, [role='button']";
+const MAX_ORDER_RESTORE_ATTEMPTS = 50;
 
 type SwipeSession = {
   key: string;
@@ -167,19 +168,40 @@ const entriesToUndoIngredients = (
   label: string,
   entries: QuantityEntry[]
 ): IncomingIngredient[] =>
-  entries.map((entry) => ({
-    value: normalizeUndoValue(entry.quantityText, entry.measureText, label),
-    recipeId: entry.sourceRecipeId ?? undefined,
-    recipeTitle: entry.sourceRecipeTitle ?? undefined,
-  }));
+  entries.map((entry) => {
+    const rawQuantity = entry.quantityText?.trim() || "";
+    const normalizedQuantity = rawQuantity.toLowerCase();
+    const hasMeaningfulQuantity =
+      normalizedQuantity.length > 0 && normalizedQuantity !== "as listed";
+    const quantityText = hasMeaningfulQuantity ? rawQuantity : "";
+    const measureText = entry.measureText?.trim() || "";
+    const includeMeasure = !quantityText && measureText;
+    return {
+      value: normalizeUndoValue(
+        quantityText || null,
+        includeMeasure ? measureText : null,
+        label
+      ),
+      recipeId: entry.sourceRecipeId ?? undefined,
+      recipeTitle: entry.sourceRecipeTitle ?? undefined,
+    };
+  });
 
 const fallbackUndoIngredient = (
   item: ShoppingListItem
 ): IncomingIngredient[] => {
-  const summary =
-    item.unitSummary && item.unitSummary !== "—"
-      ? `${item.unitSummary} ${item.label}`
-      : item.label;
+  const hasInformativeSummary = (() => {
+    if (!item.unitSummary) {
+      return false;
+    }
+    const normalized = item.unitSummary.trim().toLowerCase();
+    return (
+      normalized.length > 1 && normalized !== "—" && normalized !== "as listed"
+    );
+  })();
+  const summary = hasInformativeSummary
+    ? `${item.unitSummary} ${item.label}`
+    : item.label;
   return [
     {
       value: summary.replace(/\s+/g, " ").trim() || item.label,
@@ -221,6 +243,11 @@ export default function ShoppingListPage() {
   const [quickAddError, setQuickAddError] = useState<string | null>(null);
   const swipeSessionRef = useRef<SwipeSession | null>(null);
   const quickAddInputRef = useRef<HTMLInputElement | null>(null);
+  const itemsRef = useRef(items);
+  itemsRef.current = items;
+  const pendingOrderRestoresRef = useRef<
+    Map<string, Map<string, { snapshot: string[]; attempts: number }>>
+  >(new Map());
   const [swipePreview, setSwipePreview] = useState<SwipePreviewState>({
     key: null,
     deltaX: 0,
@@ -441,9 +468,101 @@ export default function ShoppingListPage() {
     [setCrossedOff]
   );
 
+  const orderSnapshotRef = useRef<Map<string, Map<string, string[]>>>(
+    new Map()
+  );
+
+  const flushPendingOrderRestores = useCallback(() => {
+    const pendingEntries = Array.from(
+      pendingOrderRestoresRef.current.entries()
+    );
+    pendingEntries.forEach(([ownerId, entries]) => {
+      if (!entries.size) {
+        pendingOrderRestoresRef.current.delete(ownerId);
+        return;
+      }
+      const ownerKeys = new Set(
+        itemsRef.current
+          .filter((candidate) => candidate.ownerId === ownerId)
+          .map((candidate) => candidate.storageKey)
+      );
+      const entryList = Array.from(entries.entries());
+      entryList.forEach(([key, payload]) => {
+        if (ownerKeys.has(key)) {
+          entries.delete(key);
+          if (!entries.size) {
+            pendingOrderRestoresRef.current.delete(ownerId);
+          }
+          reorderItems(payload.snapshot, ownerId);
+          return;
+        }
+        if (payload.attempts + 1 >= MAX_ORDER_RESTORE_ATTEMPTS) {
+          entries.delete(key);
+          if (!entries.size) {
+            pendingOrderRestoresRef.current.delete(ownerId);
+          }
+          return;
+        }
+        payload.attempts += 1;
+      });
+    });
+  }, [reorderItems]);
+
+  useEffect(() => {
+    flushPendingOrderRestores();
+  }, [flushPendingOrderRestores, items]);
+
+  const queueOrderRestore = useCallback(
+    (ownerId: string, key: string, snapshot: string[]) => {
+      if (!snapshot.length) {
+        return;
+      }
+      const entries = pendingOrderRestoresRef.current.get(ownerId) ?? new Map();
+      entries.set(key, { snapshot, attempts: 0 });
+      pendingOrderRestoresRef.current.set(ownerId, entries);
+      flushPendingOrderRestores();
+    },
+    [flushPendingOrderRestores]
+  );
+
+  const captureOwnerOrder = useCallback((ownerId: string, key: string) => {
+    if (!key) {
+      return;
+    }
+    const snapshots = orderSnapshotRef.current.get(ownerId) ?? new Map();
+    const ownerItems = itemsRef.current
+      .filter((candidate) => candidate.ownerId === ownerId)
+      .map((candidate) => candidate.storageKey);
+    snapshots.set(key, ownerItems);
+    orderSnapshotRef.current.set(ownerId, snapshots);
+  }, []);
+
+  const restoreOwnerOrder = useCallback(
+    (ownerId: string, key: string) => {
+      if (!key) {
+        return;
+      }
+      const snapshots = orderSnapshotRef.current.get(ownerId);
+      if (!snapshots) {
+        return;
+      }
+      const snapshot = snapshots.get(key);
+      snapshots.delete(key);
+      if (!snapshots.size) {
+        orderSnapshotRef.current.delete(ownerId);
+      }
+      if (!snapshot?.length) {
+        return;
+      }
+      queueOrderRestore(ownerId, key, snapshot);
+    },
+    [queueOrderRestore]
+  );
+
   const handleDeleteItem = useCallback(
     (item: ShoppingListItem) => {
       const ownerId = item.ownerId;
+      captureOwnerOrder(ownerId, item.storageKey);
       const entrySnapshots = getEntriesForItem(item.storageKey, ownerId);
       const undoPayload =
         entrySnapshots && entrySnapshots.length
@@ -455,10 +574,20 @@ export default function ShoppingListPage() {
       removeItem(item.storageKey, ownerId);
       showToast(`${item.label} removed`, "error", {
         actionLabel: "Undo",
-        onClick: () => addItems(undoIngredients, ownerId),
+        onClick: () => {
+          addItems(undoIngredients, ownerId);
+          restoreOwnerOrder(ownerId, item.storageKey);
+        },
       });
     },
-    [addItems, getEntriesForItem, removeItem, showToast]
+    [
+      addItems,
+      captureOwnerOrder,
+      getEntriesForItem,
+      removeItem,
+      restoreOwnerOrder,
+      showToast,
+    ]
   );
 
   const handleRequestClear = useCallback(() => {
@@ -918,10 +1047,10 @@ export default function ShoppingListPage() {
                     Add item
                   </button>
                 </div>
-                <p className="text-[11px] uppercase tracking-[0.3em] text-slate-400">
+                {/* <p className="text-[11px] uppercase tracking-[0.3em] text-slate-400">
                   Type any ingredient you need and we&rsquo;ll keep it with the
                   rest of your list.
-                </p>
+                </p> */}
                 {quickAddError && (
                   <p className="text-xs font-semibold text-rose-600">
                     {quickAddError}
