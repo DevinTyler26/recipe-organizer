@@ -97,6 +97,16 @@ type OfflineMutation =
       crossedOffAt: number | null;
     };
 
+type RemoteMutationResult =
+  | { success: true }
+  | { success: false; error: Error };
+
+type DeferredRemoteMutation = {
+  action: () => Promise<Response>;
+  ownerScope?: string | null;
+  resolve: (result: RemoteMutationResult) => void;
+};
+
 export type ShoppingListListMeta = {
   ownerId: string;
   ownerLabel: string;
@@ -146,6 +156,15 @@ const REMOTE_SYNC_INTERVAL_MS = 12_000;
 const MUTATION_NOTICE_GRACE_MS = 10_000;
 const COLLAB_UPDATE_DELAY_MS = 5_000;
 const COLLAB_UPDATE_JITTER_MS = 2_000;
+const MIN_DEFERRED_MUTATION_DELAY_MS = 8_000;
+const MAX_DEFERRED_MUTATION_DELAY_MS = 12_000;
+
+const getDeferredMutationDelay = () =>
+  MIN_DEFERRED_MUTATION_DELAY_MS +
+  Math.floor(
+    Math.random() *
+      (MAX_DEFERRED_MUTATION_DELAY_MS - MIN_DEFERRED_MUTATION_DELAY_MS)
+  );
 
 export function ShoppingListProvider({ children }: { children: ReactNode }) {
   const { data: session, status } = useSession();
@@ -192,6 +211,8 @@ export function ShoppingListProvider({ children }: { children: ReactNode }) {
   const listSignatureRef = useRef<Map<string, string>>(new Map());
   const pendingOwnerMutationsRef = useRef<Map<string, number>>(new Map());
   const recentMutationRef = useRef<Map<string, number>>(new Map());
+  const deferredMutationsRef = useRef<DeferredRemoteMutation[]>([]);
+  const deferredFlushTimerRef = useRef<number | null>(null);
   const hasPrimedListSignaturesRef = useRef(false);
   const offlineMutationsRef = useRef<OfflineMutation[]>([]);
   const offlineQueueHydratedRef = useRef(false);
@@ -647,16 +668,16 @@ export function ShoppingListProvider({ children }: { children: ReactNode }) {
     };
   }, [isAuthenticated, isClientOnline, scheduleRemoteRefresh]);
 
-  const runRemoteMutation = useCallback(
-    async (action: () => Promise<Response>, ownerScope?: string | null) => {
+  const executeRemoteMutation = useCallback(
+    async (
+      action: () => Promise<Response>,
+      ownerScope?: string | null
+    ): Promise<RemoteMutationResult> => {
       if (!isAuthenticated) {
         return {
           success: false,
           error: new Error("You need to sign in to sync this list"),
         } as const;
-      }
-      if (ownerScope) {
-        pendingOwnerMutationsRef.current.set(ownerScope, Date.now());
       }
       setIsSyncing(true);
       try {
@@ -690,6 +711,65 @@ export function ShoppingListProvider({ children }: { children: ReactNode }) {
     },
     [isAuthenticated, recordRecentMutation, scheduleRemoteRefresh]
   );
+
+  const flushDeferredMutations = useCallback(async () => {
+    if (!deferredMutationsRef.current.length) {
+      return;
+    }
+    const pending = [...deferredMutationsRef.current];
+    deferredMutationsRef.current = [];
+    for (const entry of pending) {
+      const result = await executeRemoteMutation(entry.action, entry.ownerScope);
+      entry.resolve(result);
+    }
+  }, [executeRemoteMutation]);
+
+  const scheduleDeferredMutationFlush = useCallback(() => {
+    if (typeof window === "undefined") {
+      void flushDeferredMutations();
+      return;
+    }
+    if (deferredFlushTimerRef.current) {
+      window.clearTimeout(deferredFlushTimerRef.current);
+    }
+    const delay = getDeferredMutationDelay();
+    deferredFlushTimerRef.current = window.setTimeout(() => {
+      deferredFlushTimerRef.current = null;
+      void flushDeferredMutations();
+    }, delay);
+  }, [flushDeferredMutations]);
+
+  const runRemoteMutation = useCallback(
+    (action: () => Promise<Response>, ownerScope?: string | null) => {
+      if (!isAuthenticated) {
+        return Promise.resolve({
+          success: false,
+          error: new Error("You need to sign in to sync this list"),
+        } as const);
+      }
+      if (ownerScope) {
+        pendingOwnerMutationsRef.current.set(ownerScope, Date.now());
+      }
+      return new Promise<RemoteMutationResult>((resolve) => {
+        deferredMutationsRef.current.push({
+          action,
+          ownerScope,
+          resolve,
+        });
+        scheduleDeferredMutationFlush();
+      });
+    },
+    [isAuthenticated, scheduleDeferredMutationFlush]
+  );
+
+  useEffect(() => {
+    return () => {
+      if (typeof window !== "undefined" && deferredFlushTimerRef.current) {
+        window.clearTimeout(deferredFlushTimerRef.current);
+      }
+      deferredMutationsRef.current = [];
+    };
+  }, []);
 
   const queueOfflineMutation = useCallback(
     (mutation: OfflineMutation) => {
