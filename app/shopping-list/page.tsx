@@ -2,6 +2,7 @@
 
 import Link from "next/link";
 import { signIn, useSession } from "next-auth/react";
+import { AnimatePresence, motion, type Transition } from "framer-motion";
 import {
   useCallback,
   useEffect,
@@ -56,6 +57,12 @@ const SWIPE_MAX_OFFSET = 120;
 const INTERACTIVE_SWIPE_SELECTOR =
   "button, a, input, textarea, select, [role='button']";
 const MAX_ORDER_RESTORE_ATTEMPTS = 50;
+const LIST_LAYOUT_TRANSITION: Transition = {
+  type: "spring",
+  damping: 32,
+  stiffness: 420,
+  mass: 0.4,
+};
 
 type SwipeSession = {
   key: string;
@@ -460,12 +467,45 @@ export default function ShoppingListPage() {
     [quantityEditor, updateQuantity]
   );
 
-  const handleCrossToggle = useCallback(
-    (item: ShoppingListItem, nextCrossed: boolean) => {
-      const ownerId = item.ownerId;
-      setCrossedOff(item.storageKey, nextCrossed, ownerId);
+  const focusWithoutScroll = useCallback(
+    (element: HTMLElement | null, position?: { x: number; y: number }) => {
+      if (!element || typeof window === "undefined") {
+        return;
+      }
+      const x = position?.x ?? window.scrollX;
+      const y = position?.y ?? window.scrollY;
+      try {
+        element.focus({ preventScroll: true });
+      } catch {
+        element.focus();
+      }
+      window.scrollTo({ top: y, left: x, behavior: "auto" });
     },
-    [setCrossedOff]
+    []
+  );
+
+  const handleCrossToggle = useCallback(
+    (
+      item: ShoppingListItem,
+      nextCrossed: boolean,
+      button?: HTMLButtonElement | null
+    ) => {
+      const ownerId = item.ownerId;
+      const initialScroll =
+        !nextCrossed && typeof window !== "undefined"
+          ? { x: window.scrollX, y: window.scrollY }
+          : null;
+      setCrossedOff(item.storageKey, nextCrossed, ownerId);
+      if (!nextCrossed && button) {
+        window.requestAnimationFrame(() => {
+          if (!button.isConnected) {
+            return;
+          }
+          focusWithoutScroll(button, initialScroll ?? undefined);
+        });
+      }
+    },
+    [focusWithoutScroll, setCrossedOff]
   );
 
   const orderSnapshotRef = useRef<Map<string, Map<string, string[]>>>(
@@ -819,7 +859,7 @@ export default function ShoppingListPage() {
     const isSwipeActive = isSwipeTarget && swipePreview.isActive;
     const swipeBackdropVisible =
       isSwipeTarget && Math.abs(swipePreview.deltaX) > 4;
-    const cardClasses = `flex items-center gap-3 rounded-[28px] border px-4 py-3 text-sm shadow-sm transition ${
+    const cardClasses = `flex items-center gap-3 rounded-[28px] border px-4 py-3 text-sm shadow-sm transition-all duration-300 ease-out ${
       draggingKey === item.storageKey
         ? "border-rose-200 bg-rose-50/90 opacity-80 ring-2 ring-rose-100"
         : isCrossed
@@ -828,16 +868,32 @@ export default function ShoppingListPage() {
     }`;
 
     return (
-      <li
+      <motion.li
+        layout
+        layoutId={`${item.ownerId}:${item.storageKey}`}
+        transition={LIST_LAYOUT_TRANSITION}
+        initial={false}
+        exit={{ opacity: 0, scale: 0.95 }}
         key={item.storageKey}
         draggable
-        onDragStart={(event) => beginDrag(item.storageKey, event)}
+        onDragStart={(event) =>
+          beginDrag(
+            item.storageKey,
+            event as unknown as DragEvent<HTMLLIElement>
+          )
+        }
         onDragOver={(event) => {
-          event.preventDefault();
-          event.dataTransfer.dropEffect = "move";
+          const dragEvent = event as unknown as DragEvent<HTMLLIElement>;
+          dragEvent.preventDefault();
+          dragEvent.dataTransfer.dropEffect = "move";
         }}
-        onDrop={(event) => handleItemDrop(event, item.storageKey)}
-        onDragEnd={finalizeDrag}
+        onDrop={(event) =>
+          handleItemDrop(
+            event as unknown as DragEvent<HTMLLIElement>,
+            item.storageKey
+          )
+        }
+        onDragEnd={() => finalizeDrag()}
         aria-grabbed={draggingKey === item.storageKey}
         className="relative"
       >
@@ -873,7 +929,9 @@ export default function ShoppingListPage() {
                 ? `Restore ${item.label} to the active list`
                 : `Cross off ${item.label}`
             }
-            onClick={() => handleCrossToggle(item, !isCrossed)}
+            onClick={(event) =>
+              handleCrossToggle(item, !isCrossed, event.currentTarget)
+            }
             className={`flex h-10 w-10 items-center justify-center rounded-full border-2 text-lg font-semibold transition ${
               isCrossed
                 ? "border-emerald-300 bg-emerald-50 text-emerald-600"
@@ -923,7 +981,7 @@ export default function ShoppingListPage() {
             </button>
           </div>
         </div>
-      </li>
+      </motion.li>
     );
   };
 
@@ -936,7 +994,13 @@ export default function ShoppingListPage() {
       if (isCrossed && hasCompletedItems && !completedToggleInserted) {
         completedToggleInserted = true;
         elements.push(
-          <li key="completed-toggle" className="pt-6">
+          <motion.li
+            key="completed-toggle"
+            layout
+            layoutId="completed-toggle"
+            transition={LIST_LAYOUT_TRANSITION}
+            className="pt-6"
+          >
             <button
               type="button"
               onClick={() => setShowCompleted((prev) => !prev)}
@@ -948,7 +1012,7 @@ export default function ShoppingListPage() {
               </span>
               <span className="text-base">{showCompleted ? "-" : "+"}</span>
             </button>
-          </li>
+          </motion.li>
         );
       }
       if (isCrossed && !showCompleted) {
@@ -1093,7 +1157,9 @@ export default function ShoppingListPage() {
                 }}
                 onDrop={handleListDrop}
               >
-                {listElements}
+                <AnimatePresence initial={false} mode="sync">
+                  {listElements}
+                </AnimatePresence>
               </ul>
             )}
           </div>
