@@ -29,6 +29,11 @@ const SELECTED_OWNER_STORAGE_KEY = "recipe-organizer-active-shopping-list";
 const LOCAL_OWNER_LABEL_STORAGE_KEY = "recipe-organizer-local-list-label";
 const REMOTE_LIST_CACHE_KEY = "recipe-organizer-remote-shopping-lists";
 const OFFLINE_MUTATION_CACHE_KEY = "recipe-organizer-offline-mutations";
+const SHOPPING_LIST_QUEUE_MESSAGE = "SHOPPING_LIST_QUEUE_UPDATE";
+const SHOPPING_LIST_SYNC_COMPLETE_MESSAGE = "SHOPPING_LIST_SYNC_COMPLETED";
+const SHOPPING_LIST_SYNC_TAG = "shopping-list-offline-sync";
+const SHOPPING_LIST_QUEUE_CACHE_NAME = "shopping-list-offline-queue";
+const SHOPPING_LIST_QUEUE_REQUEST_URL = "/__shopping-list-offline-queue";
 
 type ShoppingListContextValue = {
   items: ShoppingListItem[];
@@ -241,12 +246,66 @@ export function ShoppingListProvider({ children }: { children: ReactNode }) {
     remoteListsRef.current = remoteLists;
   }, [remoteLists]);
 
-  const updateOfflineQueue = useCallback((mutations: OfflineMutation[]) => {
-    offlineMutationsRef.current = mutations;
-    if (offlineQueueHydratedRef.current) {
-      persistOfflineMutationCache(mutations);
+  const syncOfflineQueueWithWorker = useCallback(
+    async (mutations: OfflineMutation[]) => {
+      if (typeof window === "undefined" || !("serviceWorker" in navigator)) {
+        return;
+      }
+      try {
+        const registration = await navigator.serviceWorker.ready;
+        registration.active?.postMessage({
+          type: SHOPPING_LIST_QUEUE_MESSAGE,
+          payload: { mutations },
+        });
+        if (mutations.length) {
+          const syncManager = (
+            registration as ServiceWorkerRegistration & {
+              sync?: { register: (tag: string) => Promise<void> };
+            }
+          ).sync;
+          if (syncManager) {
+            try {
+              await syncManager.register(SHOPPING_LIST_SYNC_TAG);
+            } catch (error) {
+              console.warn(
+                "Shopping list background sync registration failed",
+                error
+              );
+            }
+          }
+        }
+      } catch (error) {
+        console.warn("Shopping list service worker unavailable", error);
+      }
+    },
+    []
+  );
+
+  const updateOfflineQueue = useCallback(
+    (mutations: OfflineMutation[]) => {
+      offlineMutationsRef.current = mutations;
+      if (offlineQueueHydratedRef.current) {
+        persistOfflineMutationCache(mutations);
+      }
+      void syncOfflineQueueWithWorker(mutations);
+    },
+    [syncOfflineQueueWithWorker]
+  );
+
+  const reconcileOfflineQueueWithWorker = useCallback(async () => {
+    if (typeof window === "undefined" || !("caches" in window)) {
+      return;
     }
-  }, []);
+    try {
+      const cache = await window.caches.open(SHOPPING_LIST_QUEUE_CACHE_NAME);
+      const snapshot = await cache.match(SHOPPING_LIST_QUEUE_REQUEST_URL);
+      if (!snapshot && offlineMutationsRef.current.length) {
+        updateOfflineQueue([]);
+      }
+    } catch (error) {
+      console.warn("Failed to reconcile offline shopping list queue", error);
+    }
+  }, [updateOfflineQueue]);
 
   const mergeFetchedRemoteLists = useCallback(
     (fetchedLists: OwnerListState[], fetchedAt: number) => {
@@ -400,10 +459,12 @@ export function ShoppingListProvider({ children }: { children: ReactNode }) {
     const cachedMutations = readOfflineMutationCache();
     updateOfflineQueue(cachedMutations);
     offlineQueueHydratedRef.current = true;
+    void reconcileOfflineQueueWithWorker();
   }, [
     commitRemoteLists,
     evaluateRemoteListChanges,
     isAuthenticated,
+    reconcileOfflineQueueWithWorker,
     updateOfflineQueue,
   ]);
 
@@ -874,6 +935,23 @@ export function ShoppingListProvider({ children }: { children: ReactNode }) {
     }
     void flushOfflineMutations();
   }, [flushOfflineMutations, isAuthenticated, isClientOnline]);
+
+  useEffect(() => {
+    if (typeof window === "undefined" || !("serviceWorker" in navigator)) {
+      return;
+    }
+    const handleMessage = (event: MessageEvent) => {
+      if (event.data?.type !== SHOPPING_LIST_SYNC_COMPLETE_MESSAGE) {
+        return;
+      }
+      updateOfflineQueue([]);
+      void backgroundRefreshRemoteLists();
+    };
+    navigator.serviceWorker.addEventListener("message", handleMessage);
+    return () => {
+      navigator.serviceWorker.removeEventListener("message", handleMessage);
+    };
+  }, [backgroundRefreshRemoteLists, updateOfflineQueue]);
 
   const resolveOwnerId = useCallback(
     (override?: string | null) => {
