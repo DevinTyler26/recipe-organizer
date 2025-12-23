@@ -35,6 +35,9 @@ const SHOPPING_LIST_SYNC_TAG = "shopping-list-offline-sync";
 const SHOPPING_LIST_QUEUE_CACHE_NAME = "shopping-list-offline-queue";
 const SHOPPING_LIST_QUEUE_REQUEST_URL = "/__shopping-list-offline-queue";
 
+const getSelectedOwnerStorageKey = (userId: string | null) =>
+  `${SELECTED_OWNER_STORAGE_KEY}:${userId ?? "guest"}`;
+
 type ShoppingListContextValue = {
   items: ShoppingListItem[];
   lists: ShoppingListListMeta[];
@@ -206,6 +209,7 @@ export function ShoppingListProvider({ children }: { children: ReactNode }) {
   const [remoteLists, setRemoteLists] = useState<OwnerListState[]>([]);
   const remoteListsRef = useRef<OwnerListState[]>([]);
   const [isRemote, setIsRemote] = useState(false);
+  const [hasSyncedRemoteLists, setHasSyncedRemoteLists] = useState(false);
   const [isSyncing, setIsSyncing] = useState(false);
   const [selectedOwnerId, setSelectedOwnerId] = useState<string | null>(null);
   const [hasLoadedStoredSelection, setHasLoadedStoredSelection] =
@@ -223,6 +227,7 @@ export function ShoppingListProvider({ children }: { children: ReactNode }) {
   const offlineQueueHydratedRef = useRef(false);
   const remoteRefreshTimerRef = useRef<number | null>(null);
   const remoteRefreshAbortRef = useRef<(() => boolean) | null>(null);
+  const persistedOwnerIdRef = useRef<string | null>(null);
 
   const commitRemoteLists = useCallback(
     (
@@ -488,6 +493,15 @@ export function ShoppingListProvider({ children }: { children: ReactNode }) {
         const merged = mergeFetchedRemoteLists(lists, fetchStartedAt);
         commitRemoteLists(merged);
         setIsRemote(true);
+        setHasSyncedRemoteLists(true);
+        const preferred = persistedOwnerIdRef.current;
+        if (
+          preferred &&
+          merged.some((list) => list.ownerId === preferred) &&
+          selectedOwnerId !== preferred
+        ) {
+          setSelectedOwnerId(preferred);
+        }
         evaluateRemoteListChanges(merged);
       } catch (error) {
         if (!shouldAbort?.()) {
@@ -502,6 +516,7 @@ export function ShoppingListProvider({ children }: { children: ReactNode }) {
       mergeFetchedRemoteLists,
       isAuthenticated,
       isClientOnline,
+      selectedOwnerId,
     ]
   );
 
@@ -597,21 +612,31 @@ export function ShoppingListProvider({ children }: { children: ReactNode }) {
       setHasLoadedStoredSelection(true);
       return;
     }
-    const stored = window.localStorage.getItem(SELECTED_OWNER_STORAGE_KEY);
+    const storageKey = getSelectedOwnerStorageKey(
+      isAuthenticated ? currentUserId : null
+    );
+    const stored = window.localStorage.getItem(storageKey);
     if (stored) {
       setSelectedOwnerId(stored);
+      persistedOwnerIdRef.current = stored;
     } else if (!isAuthenticated) {
       setSelectedOwnerId(LOCAL_OWNER_ID);
+      persistedOwnerIdRef.current = LOCAL_OWNER_ID;
     }
     setHasLoadedStoredSelection(true);
-  }, [isAuthenticated]);
+  }, [currentUserId, isAuthenticated]);
 
   useEffect(() => {
+    if (status === "loading") {
+      return;
+    }
     if (!isAuthenticated) {
       setIsRemote(false);
+      setHasSyncedRemoteLists(false);
       commitRemoteLists([]);
       setLocalStore(readStoredState());
       setSelectedOwnerId(LOCAL_OWNER_ID);
+      persistedOwnerIdRef.current = LOCAL_OWNER_ID;
       listSignatureRef.current.clear();
       pendingOwnerMutationsRef.current.clear();
       hasPrimedListSignaturesRef.current = false;
@@ -631,12 +656,17 @@ export function ShoppingListProvider({ children }: { children: ReactNode }) {
         const merged = mergeFetchedRemoteLists(lists, fetchStartedAt);
         commitRemoteLists(merged);
         setIsRemote(true);
+        setHasSyncedRemoteLists(true);
         setSelectedOwnerId((current) => {
           if (current && merged.some((list) => list.ownerId === current)) {
             return current;
           }
           if (!hasLoadedStoredSelection) {
             return current;
+          }
+          const preferred = persistedOwnerIdRef.current;
+          if (preferred && merged.some((list) => list.ownerId === preferred)) {
+            return preferred;
           }
           return merged[0]?.ownerId ?? currentUserId ?? current;
         });
@@ -666,6 +696,7 @@ export function ShoppingListProvider({ children }: { children: ReactNode }) {
     hasLoadedStoredSelection,
     isAuthenticated,
     isClientOnline,
+    status,
   ]);
 
   useEffect(() => {
@@ -1406,12 +1437,12 @@ export function ShoppingListProvider({ children }: { children: ReactNode }) {
   );
 
   const resolvedLists = useMemo<OwnerListState[]>(() => {
+    let base: OwnerListState[] = [];
     if (isAuthenticated) {
       if (isRemote) {
-        return remoteLists;
-      }
-      if (currentUserId) {
-        return [
+        base = remoteLists;
+      } else if (currentUserId) {
+        base = [
           {
             ownerId: currentUserId,
             ownerLabel: selfListLabel,
@@ -1421,18 +1452,35 @@ export function ShoppingListProvider({ children }: { children: ReactNode }) {
           },
         ];
       }
-      return [];
+    } else {
+      base = [
+        {
+          ownerId: LOCAL_OWNER_ID,
+          ownerLabel: localListLabel,
+          ownerDisplayName: derivedSelfDisplayName,
+          isSelf: true,
+          state: localStore,
+        },
+      ];
     }
 
-    return [
-      {
-        ownerId: LOCAL_OWNER_ID,
-        ownerLabel: localListLabel,
-        ownerDisplayName: derivedSelfDisplayName,
-        isSelf: true,
-        state: localStore,
-      },
-    ];
+    if (!base.length) {
+      return base;
+    }
+
+    const prioritizedOwnerId =
+      selectedOwnerId ?? persistedOwnerIdRef.current ?? null;
+    const ordered = base.slice();
+    if (prioritizedOwnerId) {
+      const index = ordered.findIndex(
+        (list) => list.ownerId === prioritizedOwnerId
+      );
+      if (index > 0) {
+        const [match] = ordered.splice(index, 1);
+        ordered.unshift(match);
+      }
+    }
+    return ordered;
   }, [
     currentUserId,
     isAuthenticated,
@@ -1441,6 +1489,7 @@ export function ShoppingListProvider({ children }: { children: ReactNode }) {
     localListLabel,
     localStore,
     remoteLists,
+    selectedOwnerId,
     selfListLabel,
   ]);
 
@@ -1453,18 +1502,51 @@ export function ShoppingListProvider({ children }: { children: ReactNode }) {
       if (!hasLoadedStoredSelection) {
         return current;
       }
-      return resolvedLists[0].ownerId;
+      if (isAuthenticated && !hasSyncedRemoteLists) {
+        return current;
+      }
+      const fallbackOwnerId = resolvedLists[0]?.ownerId ?? current;
+      if (fallbackOwnerId && fallbackOwnerId !== current) {
+        persistedOwnerIdRef.current = fallbackOwnerId;
+      }
+      return fallbackOwnerId ?? current;
     });
-  }, [resolvedLists, hasLoadedStoredSelection]);
+  }, [
+    hasLoadedStoredSelection,
+    hasSyncedRemoteLists,
+    isAuthenticated,
+    resolvedLists,
+  ]);
 
   useEffect(() => {
-    if (typeof window === "undefined") return;
-    if (selectedOwnerId) {
-      window.localStorage.setItem(SELECTED_OWNER_STORAGE_KEY, selectedOwnerId);
-    } else {
-      window.localStorage.removeItem(SELECTED_OWNER_STORAGE_KEY);
+    const preferred = persistedOwnerIdRef.current;
+    if (!preferred || selectedOwnerId === preferred) {
+      return;
     }
-  }, [selectedOwnerId]);
+    if (!resolvedLists.some((list) => list.ownerId === preferred)) {
+      return;
+    }
+    setSelectedOwnerId(preferred);
+  }, [resolvedLists, selectedOwnerId]);
+
+  useEffect(() => {
+    if (!hasLoadedStoredSelection || typeof window === "undefined") {
+      return;
+    }
+    const storageKey = getSelectedOwnerStorageKey(
+      isAuthenticated ? currentUserId : null
+    );
+    if (selectedOwnerId) {
+      window.localStorage.setItem(storageKey, selectedOwnerId);
+    } else {
+      window.localStorage.removeItem(storageKey);
+    }
+  }, [
+    currentUserId,
+    hasLoadedStoredSelection,
+    isAuthenticated,
+    selectedOwnerId,
+  ]);
 
   const activeList = useMemo(() => {
     if (!resolvedLists.length) return null;
@@ -1502,12 +1584,19 @@ export function ShoppingListProvider({ children }: { children: ReactNode }) {
     [items]
   );
 
-  const selectList = useCallback((ownerId: string) => {
-    setSelectedOwnerId(ownerId);
-    if (typeof window !== "undefined") {
-      window.localStorage.setItem(SELECTED_OWNER_STORAGE_KEY, ownerId);
-    }
-  }, []);
+  const selectList = useCallback(
+    (ownerId: string) => {
+      setSelectedOwnerId(ownerId);
+      persistedOwnerIdRef.current = ownerId;
+      if (typeof window !== "undefined") {
+        const storageKey = getSelectedOwnerStorageKey(
+          isAuthenticated ? currentUserId : null
+        );
+        window.localStorage.setItem(storageKey, ownerId);
+      }
+    },
+    [currentUserId, isAuthenticated]
+  );
 
   const renameList = useCallback(
     async (ownerId: string, nextLabel: string) => {
