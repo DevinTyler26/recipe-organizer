@@ -333,6 +333,7 @@ export default function HomePage() {
     null
   );
   const [deletingRecipeId, setDeletingRecipeId] = useState<string | null>(null);
+  const [leavingRecipeId, setLeavingRecipeId] = useState<string | null>(null);
   const [editingRecipeId, setEditingRecipeId] = useState<string | null>(null);
   const [pendingDeletionRecipe, setPendingDeletionRecipe] =
     useState<Recipe | null>(null);
@@ -1374,6 +1375,60 @@ export default function HomePage() {
     }
   };
 
+  const handleLeaveRecipe = useCallback(
+    async (recipe: Recipe) => {
+      if (!isAuthenticated) {
+        showToast("Sign in to manage shared recipes.", "error");
+        return;
+      }
+      if (!isClientOnline) {
+        showToast("Reconnect to leave this shared recipe.", "error");
+        return;
+      }
+      setLeavingRecipeId(recipe.id);
+      try {
+        const response = await fetch("/api/collaborations", {
+          method: "DELETE",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            resourceType: "RECIPE",
+            resourceId: recipe.id,
+          }),
+        });
+        const body = (await response.json().catch(() => null)) as {
+          error?: string;
+        } | null;
+        if (!response.ok) {
+          throw new Error(body?.error ?? "Failed to leave recipe");
+        }
+        setRecipes((current) =>
+          current.filter((existing) => existing.id !== recipe.id)
+        );
+        showToast(`You left ${recipe.title}.`, "info");
+        void refreshCollaborations();
+        void fetchRemoteRecipes({ background: true });
+      } catch (error) {
+        const message =
+          error instanceof Error && error.message
+            ? error.message
+            : "Unable to leave this recipe right now.";
+        console.error("Failed to leave recipe collaboration", error);
+        showToast(message, "error");
+      } finally {
+        setLeavingRecipeId((current) =>
+          current === recipe.id ? null : current
+        );
+      }
+    },
+    [
+      fetchRemoteRecipes,
+      isAuthenticated,
+      isClientOnline,
+      refreshCollaborations,
+      showToast,
+    ]
+  );
+
   const handleEditRecipe = useCallback((recipe: Recipe) => {
     setEditingRecipeId(recipe.id);
     setForm({
@@ -2220,6 +2275,26 @@ export default function HomePage() {
                                 <span>Share recipe</span>
                                 <span className="text-xs text-slate-400">
                                   ⇢
+                                </span>
+                              </button>
+                            )}
+                            {isSharedRecipe && (
+                              <button
+                                type="button"
+                                className="flex w-full items-center justify-between rounded-xl px-3 py-2 text-left text-rose-600 transition hover:bg-rose-50"
+                                disabled={leavingRecipeId === recipe.id}
+                                onClick={() => {
+                                  setActionsMenuRecipeId(null);
+                                  void handleLeaveRecipe(recipe);
+                                }}
+                              >
+                                <span>
+                                  {leavingRecipeId === recipe.id
+                                    ? "Leaving…"
+                                    : "Leave recipe"}
+                                </span>
+                                <span className="text-xs text-rose-300">
+                                  ↩
                                 </span>
                               </button>
                             )}
