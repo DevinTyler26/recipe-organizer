@@ -1,3 +1,8 @@
+## <small>1.1.1 (2025-12-23)</small>
+
+* Merge pull request #26 from DevinTyler26/dc/persist-active-list ([f2f5689](https://github.com/DevinTyler26/recipe-organizer/commit/f2f5689)), closes [#26](https://github.com/DevinTyler26/recipe-organizer/issues/26)
+* fix: persist active list ([81e87be](https://github.com/DevinTyler26/recipe-organizer/commit/81e87be))
+
 ## 1.1.0 (2025-12-23)
 
 * Merge pull request #23 from DevinTyler26/dc/add-analytics ([c7a129f](https://github.com/DevinTyler26/recipe-organizer/commit/c7a129f)), closes [#23](https://github.com/DevinTyler26/recipe-organizer/issues/23)
