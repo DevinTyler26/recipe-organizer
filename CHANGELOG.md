@@ -1,3 +1,12 @@
+## 1.1.0 (2025-12-23)
+
+* Merge pull request #23 from DevinTyler26/dc/add-analytics ([c7a129f](https://github.com/DevinTyler26/recipe-organizer/commit/c7a129f)), closes [#23](https://github.com/DevinTyler26/recipe-organizer/issues/23)
+* Merge pull request #24 from DevinTyler26/dc/add-analytics ([5e8538d](https://github.com/DevinTyler26/recipe-organizer/commit/5e8538d)), closes [#24](https://github.com/DevinTyler26/recipe-organizer/issues/24)
+* Merge pull request #25 from DevinTyler26/dc/recipe-toggle ([872ad8a](https://github.com/DevinTyler26/recipe-organizer/commit/872ad8a)), closes [#25](https://github.com/DevinTyler26/recipe-organizer/issues/25)
+* Update layout.tsx ([ff7e372](https://github.com/DevinTyler26/recipe-organizer/commit/ff7e372))
+* feat: recipe list toggle ([35ddb2a](https://github.com/DevinTyler26/recipe-organizer/commit/35ddb2a))
+* chore: add analytics ([6cf90f7](https://github.com/DevinTyler26/recipe-organizer/commit/6cf90f7))
+
 ## 1.0.0 (2025-12-23)
 
 * Initial commit from Create Next App ([4eb3daf](https://github.com/DevinTyler26/recipe-organizer/commit/4eb3daf))
