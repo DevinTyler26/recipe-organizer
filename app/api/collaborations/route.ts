@@ -225,9 +225,19 @@ export async function DELETE(request: Request) {
       { status: 400 }
     );
   }
-  if (typeof collaboratorId !== "string" || !collaboratorId.trim()) {
+  let normalizedCollaboratorId: string | null = null;
+  if (typeof collaboratorId === "string") {
+    normalizedCollaboratorId = collaboratorId.trim();
+  } else if (collaboratorId !== undefined && collaboratorId !== null) {
     return NextResponse.json(
-      { error: "collaboratorId is required" },
+      { error: "collaboratorId must be a string if provided" },
+      { status: 400 }
+    );
+  }
+
+  if (collaboratorId !== undefined && !normalizedCollaboratorId) {
+    return NextResponse.json(
+      { error: "collaboratorId cannot be empty" },
       { status: 400 }
     );
   }
@@ -237,14 +247,15 @@ export async function DELETE(request: Request) {
       ? CollaborationResourceType.RECIPE
       : CollaborationResourceType.SHOPPING_LIST;
   const normalizedResourceId = resourceId.trim();
-  const normalizedCollaboratorId = collaboratorId.trim();
+  const targetCollaboratorId = normalizedCollaboratorId ?? user.id;
+  const isSelfRemoval = targetCollaboratorId === user.id;
 
   const collaboration = await prisma.collaboration.findFirst({
     where: {
-      ownerId: user.id,
       resourceType: normalizedResourceType,
       resourceId: normalizedResourceId,
-      collaboratorId: normalizedCollaboratorId,
+      collaboratorId: targetCollaboratorId,
+      ...(isSelfRemoval ? {} : { ownerId: user.id }),
     },
   });
 
@@ -257,5 +268,5 @@ export async function DELETE(request: Request) {
 
   await prisma.collaboration.delete({ where: { id: collaboration.id } });
 
-  return NextResponse.json({ success: true });
+  return NextResponse.json({ success: true, left: isSelfRemoval });
 }
