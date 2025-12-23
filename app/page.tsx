@@ -9,6 +9,7 @@ import {
   type DragEvent,
   type FormEvent,
 } from "react";
+import { motion } from "framer-motion";
 import { useSession } from "next-auth/react";
 import { useRouter } from "next/navigation";
 import { useShoppingList } from "@/components/shopping-list-context";
@@ -222,6 +223,12 @@ const parseTagsInput = (value: string) => dedupeTags(value.split(/,|\n/));
 const ensureTagsArray = (tags?: string[]) =>
   dedupeTags(Array.isArray(tags) ? tags : []);
 
+const FILTER_HIGHLIGHT_CLASSES: Record<"all" | "favorites" | "mine", string> = {
+  all: "bg-slate-900 shadow-lg",
+  favorites: "bg-rose-500 shadow-lg",
+  mine: "bg-amber-500 shadow-lg",
+};
+
 const normalizeRecipeOwner = (owner: StoredRecipe["owner"]): RecipeOwner => {
   if (!owner || typeof owner !== "object") {
     return null;
@@ -337,9 +344,9 @@ export default function HomePage() {
   const [offlineQueueVersion, setOfflineQueueVersion] = useState(0);
   const [shareWithCurrentCollaborators, setShareWithCurrentCollaborators] =
     useState(true);
-  const [libraryFilter, setLibraryFilter] = useState<"all" | "favorites">(
-    "all"
-  );
+  const [libraryFilter, setLibraryFilter] = useState<
+    "all" | "favorites" | "mine"
+  >("all");
   const [sortMode, setSortMode] = useState<"default" | "favorites-first">(
     "default"
   );
@@ -921,7 +928,11 @@ export default function HomePage() {
   ]);
   useEffect(() => {
     const storedFilter = window.localStorage.getItem("recipe-library-filter");
-    if (storedFilter === "all" || storedFilter === "favorites") {
+    if (
+      storedFilter === "all" ||
+      storedFilter === "favorites" ||
+      storedFilter === "mine"
+    ) {
       setLibraryFilter(storedFilter);
     }
   }, []);
@@ -929,6 +940,15 @@ export default function HomePage() {
   useEffect(() => {
     window.localStorage.setItem("recipe-library-filter", libraryFilter);
   }, [libraryFilter]);
+
+  useEffect(() => {
+    if (status === "loading") {
+      return;
+    }
+    if (!currentUserId && libraryFilter === "mine") {
+      setLibraryFilter("all");
+    }
+  }, [currentUserId, libraryFilter, status]);
 
   useEffect(() => {
     if (typeof window === "undefined") {
@@ -1552,10 +1572,24 @@ export default function HomePage() {
     [orderedRecipes]
   );
   const favoriteCount = favoritesOnly.length;
-  const baseLibrary = useMemo(
-    () => (libraryFilter === "favorites" ? favoritesOnly : orderedRecipes),
-    [favoritesOnly, libraryFilter, orderedRecipes]
-  );
+  const ownedRecipes = useMemo(() => {
+    if (!currentUserId) {
+      return [];
+    }
+    return orderedRecipes.filter(
+      (recipe) => recipe.owner?.id === currentUserId
+    );
+  }, [currentUserId, orderedRecipes]);
+  const ownedCount = currentUserId ? ownedRecipes.length : 0;
+  const baseLibrary = useMemo(() => {
+    if (libraryFilter === "favorites") {
+      return favoritesOnly;
+    }
+    if (libraryFilter === "mine") {
+      return ownedRecipes;
+    }
+    return orderedRecipes;
+  }, [favoritesOnly, libraryFilter, orderedRecipes, ownedRecipes]);
   const favoritesViewEmpty =
     libraryFilter === "favorites" && favoriteCount === 0;
   const effectiveSortMode = favoritesViewEmpty ? "default" : sortMode;
@@ -1572,6 +1606,10 @@ export default function HomePage() {
     ? "Loading recipes…"
     : libraryFilter === "favorites"
     ? `${favoriteCount} favorite${favoriteCount === 1 ? "" : "s"}`
+    : libraryFilter === "mine"
+    ? currentUserId
+      ? `${ownedCount} owned`
+      : "Sign in to see owned recipes"
     : `${orderedRecipes.length} saved`;
   const canDragReorder =
     effectiveSortMode === "default" && displayedRecipes.length > 1;
@@ -1692,7 +1730,7 @@ export default function HomePage() {
       }
       event.preventDefault();
       const fallbackTargetId =
-        libraryFilter === "favorites"
+        libraryFilter === "favorites" || libraryFilter === "mine"
           ? displayedRecipes[displayedRecipes.length - 1]?.id ?? null
           : null;
       reorderRelative(fallbackTargetId, true);
@@ -1859,25 +1897,70 @@ export default function HomePage() {
                     type="button"
                     aria-pressed={libraryFilter === "all"}
                     onClick={() => setLibraryFilter("all")}
-                    className={`rounded-xl px-4 py-2 transition ${
+                    className={`relative isolate overflow-hidden rounded-xl px-4 py-2 transition ${
                       libraryFilter === "all"
-                        ? "bg-slate-900 text-white shadow"
+                        ? "text-white"
                         : "text-slate-500 hover:text-slate-900"
                     }`}
                   >
-                    All ({orderedRecipes.length})
+                    {libraryFilter === "all" && (
+                      <motion.span
+                        layoutId="libraryFilterHighlight"
+                        className={`pointer-events-none absolute inset-0 rounded-xl ${FILTER_HIGHLIGHT_CLASSES.all}`}
+                        transition={{ type: "spring", stiffness: 500, damping: 40 }}
+                      />
+                    )}
+                    <span className="relative z-10">
+                      All ({orderedRecipes.length})
+                    </span>
                   </button>
                   <button
                     type="button"
                     aria-pressed={libraryFilter === "favorites"}
                     onClick={() => setLibraryFilter("favorites")}
-                    className={`rounded-xl px-4 py-2 transition ${
+                    className={`relative isolate overflow-hidden rounded-xl px-4 py-2 transition ${
                       libraryFilter === "favorites"
-                        ? "bg-rose-500 text-white shadow"
+                        ? "text-white"
                         : "text-slate-500 hover:text-slate-900"
                     }`}
                   >
-                    Favorites ({favoriteCount})
+                    {libraryFilter === "favorites" && (
+                      <motion.span
+                        layoutId="libraryFilterHighlight"
+                        className={`pointer-events-none absolute inset-0 rounded-xl ${FILTER_HIGHLIGHT_CLASSES.favorites}`}
+                        transition={{ type: "spring", stiffness: 500, damping: 40 }}
+                      />
+                    )}
+                    <span className="relative z-10">
+                      Favorites ({favoriteCount})
+                    </span>
+                  </button>
+                  <button
+                    type="button"
+                    aria-pressed={libraryFilter === "mine"}
+                    disabled={!currentUserId}
+                    title={
+                      currentUserId
+                        ? "Show only the recipes you created"
+                        : "Sign in to filter by owner"
+                    }
+                    onClick={() => currentUserId && setLibraryFilter("mine")}
+                    className={`relative isolate overflow-hidden rounded-xl px-4 py-2 transition ${
+                      libraryFilter === "mine" && currentUserId
+                        ? "text-white"
+                        : "text-slate-500 hover:text-slate-900"
+                    } ${!currentUserId ? "cursor-not-allowed opacity-50" : ""}`}
+                  >
+                    {libraryFilter === "mine" && currentUserId && (
+                      <motion.span
+                        layoutId="libraryFilterHighlight"
+                        className={`pointer-events-none absolute inset-0 rounded-xl ${FILTER_HIGHLIGHT_CLASSES.mine}`}
+                        transition={{ type: "spring", stiffness: 500, damping: 40 }}
+                      />
+                    )}
+                    <span className="relative z-10">
+                      Mine ({currentUserId ? ownedCount : 0})
+                    </span>
                   </button>
                 </div>
                 <button
@@ -1901,7 +1984,7 @@ export default function HomePage() {
                       : "Bubble favorites to the top of the list"
                   }
                   className={`rounded-2xl border px-4 py-2 text-xs font-semibold transition focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-rose-400 disabled:cursor-not-allowed disabled:opacity-60 ${
-                    sortMode === "favorites-first" && libraryFilter === "all"
+                    sortMode === "favorites-first" && libraryFilter !== "favorites"
                       ? "border-rose-200 bg-rose-50 text-rose-600"
                       : "border-slate-200 bg-white/70 text-slate-500 hover:text-slate-900"
                   }`}
@@ -1912,12 +1995,14 @@ export default function HomePage() {
                   {canDragReorder
                     ? libraryFilter === "favorites"
                       ? "Drag any favorite to re-rank this view."
+                      : libraryFilter === "mine"
+                      ? "Drag recipes you created to adjust their rank."
                       : "Drag recipes to reorder your library."
                     : effectiveSortMode !== "default"
                     ? "Disable Favorites first to drag and drop recipes."
                     : displayedRecipes.length <= 1
                     ? "Add another recipe to unlock drag-and-drop ordering."
-                    : "Drag-to-reorder works in All or Favorites while using default sorting."}
+                    : "Drag-to-reorder works in All, Mine, or Favorites while using default sorting."}
                 </p>
               </div>
             </div>
@@ -1965,6 +2050,10 @@ export default function HomePage() {
                 <div className="rounded-2xl border border-dashed border-slate-200 bg-white/70 px-4 py-5 text-sm text-slate-500">
                   {libraryFilter === "favorites"
                     ? "Mark recipes as favorites to spotlight them here."
+                    : libraryFilter === "mine"
+                    ? currentUserId
+                      ? "Recipes you create will show up here. Start by saving one."
+                      : "Sign in to track which recipes you own."
                     : "No saved recipes yet. Add your first creation to see it in this library."}
                 </div>
               ) : (
