@@ -1,5 +1,6 @@
 import type { Metadata, Viewport } from "next";
 import { Geist, Geist_Mono } from "next/font/google";
+import { Analytics } from "@vercel/analytics/react";
 import { ShoppingListProvider } from "@/components/shopping-list-context";
 import { AuthSessionProvider } from "@/components/session-provider";
 import { ToastProvider } from "@/components/toast-provider";
@@ -90,6 +91,7 @@ export default function RootLayout({
             </CollaborationUIProvider>
           </ToastProvider>
         </AuthSessionProvider>
+        <Analytics />
       </body>
     </html>
   );
