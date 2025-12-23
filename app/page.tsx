@@ -1882,7 +1882,7 @@ export default function HomePage() {
           </form>
 
           <div className="rounded-3xl border border-white/70 bg-white/85 p-8 shadow-xl shadow-slate-200/70 backdrop-blur">
-            <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
+            <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
               <div className="flex flex-col gap-1 sm:flex-1">
                 <h2 className="text-2xl font-semibold text-slate-900">
                   Recipe library
@@ -1907,7 +1907,11 @@ export default function HomePage() {
                       <motion.span
                         layoutId="libraryFilterHighlight"
                         className={`pointer-events-none absolute inset-0 rounded-xl ${FILTER_HIGHLIGHT_CLASSES.all}`}
-                        transition={{ type: "spring", stiffness: 500, damping: 40 }}
+                        transition={{
+                          type: "spring",
+                          stiffness: 500,
+                          damping: 40,
+                        }}
                       />
                     )}
                     <span className="relative z-10">
@@ -1928,7 +1932,11 @@ export default function HomePage() {
                       <motion.span
                         layoutId="libraryFilterHighlight"
                         className={`pointer-events-none absolute inset-0 rounded-xl ${FILTER_HIGHLIGHT_CLASSES.favorites}`}
-                        transition={{ type: "spring", stiffness: 500, damping: 40 }}
+                        transition={{
+                          type: "spring",
+                          stiffness: 500,
+                          damping: 40,
+                        }}
                       />
                     )}
                     <span className="relative z-10">
@@ -1955,7 +1963,11 @@ export default function HomePage() {
                       <motion.span
                         layoutId="libraryFilterHighlight"
                         className={`pointer-events-none absolute inset-0 rounded-xl ${FILTER_HIGHLIGHT_CLASSES.mine}`}
-                        transition={{ type: "spring", stiffness: 500, damping: 40 }}
+                        transition={{
+                          type: "spring",
+                          stiffness: 500,
+                          damping: 40,
+                        }}
                       />
                     )}
                     <span className="relative z-10">
@@ -1984,7 +1996,8 @@ export default function HomePage() {
                       : "Bubble favorites to the top of the list"
                   }
                   className={`rounded-2xl border px-4 py-2 text-xs font-semibold transition focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-rose-400 disabled:cursor-not-allowed disabled:opacity-60 ${
-                    sortMode === "favorites-first" && libraryFilter !== "favorites"
+                    sortMode === "favorites-first" &&
+                    libraryFilter !== "favorites"
                       ? "border-rose-200 bg-rose-50 text-rose-600"
                       : "border-slate-200 bg-white/70 text-slate-500 hover:text-slate-900"
                   }`}
