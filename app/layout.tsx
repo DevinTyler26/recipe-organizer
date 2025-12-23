@@ -4,6 +4,7 @@ import { ShoppingListProvider } from "@/components/shopping-list-context";
 import { AuthSessionProvider } from "@/components/session-provider";
 import { ToastProvider } from "@/components/toast-provider";
 import { CollaborationUIProvider } from "@/components/collaboration-ui-context";
+import { SiteFooter } from "@/components/site-footer";
 import "./globals.css";
 
 const geistSans = Geist({
@@ -80,7 +81,12 @@ export default function RootLayout({
         <AuthSessionProvider>
           <ToastProvider>
             <CollaborationUIProvider>
-              <ShoppingListProvider>{children}</ShoppingListProvider>
+              <ShoppingListProvider>
+                <div className="flex min-h-screen flex-col">
+                  <div className="flex-1">{children}</div>
+                  <SiteFooter />
+                </div>
+              </ShoppingListProvider>
             </CollaborationUIProvider>
           </ToastProvider>
         </AuthSessionProvider>
