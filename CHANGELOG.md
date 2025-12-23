@@ -1,3 +1,8 @@
+## <small>1.1.2 (2025-12-23)</small>
+
+* Merge pull request #27 from DevinTyler26/dc/leave-recipes ([724f9c5](https://github.com/DevinTyler26/recipe-organizer/commit/724f9c5)), closes [#27](https://github.com/DevinTyler26/recipe-organizer/issues/27)
+* fix: leave recipes ([27646dd](https://github.com/DevinTyler26/recipe-organizer/commit/27646dd))
+
 ## <small>1.1.1 (2025-12-23)</small>
 
 * Merge pull request #26 from DevinTyler26/dc/persist-active-list ([f2f5689](https://github.com/DevinTyler26/recipe-organizer/commit/f2f5689)), closes [#26](https://github.com/DevinTyler26/recipe-organizer/issues/26)
