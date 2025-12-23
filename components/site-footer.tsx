@@ -15,7 +15,7 @@ export function SiteFooter() {
               {channelLabel}
             </span>
           )}
-          <span>Semantic release enabled</span>
+          <span>© Devin Cunningham - {new Date().getFullYear()}</span>
         </span>
       </div>
     </footer>
