@@ -1,3 +1,9 @@
+## 1.2.0 (2026-01-03)
+
+* feat(pantry): trigger build (#30) ([2616e4f](https://github.com/DevinTyler26/recipe-organizer/commit/2616e4f)), closes [#30](https://github.com/DevinTyler26/recipe-organizer/issues/30)
+* Dc/pantry (#28) ([b4f4f5b](https://github.com/DevinTyler26/recipe-organizer/commit/b4f4f5b)), closes [#28](https://github.com/DevinTyler26/recipe-organizer/issues/28)
+* Dc/pantry (#29) ([cdfff2f](https://github.com/DevinTyler26/recipe-organizer/commit/cdfff2f)), closes [#29](https://github.com/DevinTyler26/recipe-organizer/issues/29)
+
 ## <small>1.1.2 (2025-12-23)</small>
 
 * Merge pull request #27 from DevinTyler26/dc/leave-recipes ([724f9c5](https://github.com/DevinTyler26/recipe-organizer/commit/724f9c5)), closes [#27](https://github.com/DevinTyler26/recipe-organizer/issues/27)
