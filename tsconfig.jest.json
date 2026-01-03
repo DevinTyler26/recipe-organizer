@@ -5,6 +5,10 @@
     "moduleResolution": "node",
     "isolatedModules": false,
     "types": ["jest"],
+    "paths": {
+      "@prisma/client": ["./node_modules/.prisma/client"],
+      "@/*": ["./*"]
+    },
     "esModuleInterop": true,
     "allowJs": true
   }
