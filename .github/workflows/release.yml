@@ -36,9 +36,15 @@ jobs:
         run: npm run lint
 
       - name: Test
-        run: npm test -- --runInBand
+        env:
+          DATABASE_URL: postgresql://user:pass@localhost:5432/recipe_organizer?schema=public
+        run: |
+          npx prisma generate
+          npm test -- --runInBand
 
       - name: Build
+        env:
+          DATABASE_URL: postgresql://user:pass@localhost:5432/recipe_organizer?schema=public
         run: npm run build
 
       - name: Semantic release
