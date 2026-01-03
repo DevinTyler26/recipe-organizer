@@ -16,6 +16,7 @@ import { useShoppingList } from "@/components/shopping-list-context";
 import { useCollaborationUI } from "@/components/collaboration-ui-context";
 import { AppNav } from "@/components/app-nav";
 import { useToast } from "@/components/toast-provider";
+import { parseIngredient, type IncomingIngredient } from "@/lib/shopping-list";
 import type { CollaboratorSummary } from "@/types/collaboration";
 
 type RecipeOwner = {
@@ -50,6 +51,20 @@ type StoredRecipe = {
   updatedAt?: string;
   updatedBy?: RecipeOwner;
   updatedById?: string | null;
+};
+
+type PantryConflictItem = {
+  id: string;
+  label: string;
+  ingredient: IncomingIngredient;
+  parsedLabel: string;
+  measureText: string;
+  amountValue: number | null;
+};
+
+type PantryConflictModalState = {
+  recipeTitle: string;
+  items: PantryConflictItem[];
 };
 
 const STARTER_UPDATED_AT = "2024-01-01T00:00:00.000Z";
@@ -313,6 +328,7 @@ export default function HomePage() {
     externalUpdateNotice,
     acknowledgeExternalUpdate,
     refreshCollaborativeLists,
+    refreshPantry,
     hasLoadedStoredSelection,
   } = useShoppingList();
   const { data: session, status } = useSession();
@@ -345,6 +361,14 @@ export default function HomePage() {
   const [offlineQueueVersion, setOfflineQueueVersion] = useState(0);
   const [shareWithCurrentCollaborators, setShareWithCurrentCollaborators] =
     useState(true);
+  const [pantryConflictModal, setPantryConflictModal] =
+    useState<PantryConflictModalState | null>(null);
+  const [pantryConflictSelections, setPantryConflictSelections] = useState<
+    Record<string, boolean>
+  >({});
+  const [pantryConflictQuantities, setPantryConflictQuantities] = useState<
+    Record<string, number | null>
+  >({});
   const [libraryFilter, setLibraryFilter] = useState<
     "all" | "favorites" | "mine"
   >("all");
@@ -419,6 +443,28 @@ export default function HomePage() {
     activeSharedListOwnerId && activeShoppingList
       ? activeShoppingList.ownerLabel
       : null;
+  const pantryConflictSelectedItems = useMemo(() => {
+    if (!pantryConflictModal) {
+      return [];
+    }
+    return pantryConflictModal.items.filter(
+      (item) => pantryConflictSelections[item.id]
+    );
+  }, [pantryConflictModal, pantryConflictSelections]);
+  const hasPantryConflictSelections = Boolean(
+    pantryConflictModal?.items.length
+  );
+  const pantryConflictNote = useMemo(() => {
+    if (!pantryConflictModal) {
+      return "";
+    }
+    return `These ingredients from "${pantryConflictModal.recipeTitle}" are already in your pantry and were skipped. Select any to add anyway and adjust the quantity if needed.`;
+  }, [pantryConflictModal]);
+
+  const formatQuantityValue = useCallback((value: number) => {
+    const rounded = Math.round(value * 100) / 100;
+    return Number.isInteger(rounded) ? `${rounded}` : `${rounded}`;
+  }, []);
   useEffect(() => {
     setShareWithCurrentCollaborators(true);
   }, [activeShoppingList?.ownerId]);
@@ -1282,21 +1328,173 @@ export default function HomePage() {
     }
   };
 
-  const handleAddToShoppingList = (recipe: Recipe) => {
-    addItems(
+  const openPantryConflictModal = useCallback(
+    (
+      recipe: Recipe,
+      skippedIngredients: { label: string; ingredient: IncomingIngredient }[]
+    ) => {
+      const items = skippedIngredients.map((entry, index) => {
+        const parsed = parseIngredient(entry.ingredient.value);
+        const parsedLabel = parsed.label || entry.label;
+        return {
+          id: `${recipe.id}-pantry-${index}`,
+          label: parsedLabel,
+          ingredient: entry.ingredient,
+          parsedLabel,
+          measureText: parsed.measureText || "",
+          amountValue:
+            typeof parsed.amountValue === "number" &&
+            Number.isFinite(parsed.amountValue)
+              ? parsed.amountValue
+              : null,
+        };
+      });
+      setPantryConflictModal({
+        recipeTitle: recipe.title,
+        items,
+      });
+      setPantryConflictSelections({});
+      setPantryConflictQuantities(
+        items.reduce<Record<string, number | null>>((acc, item) => {
+          acc[item.id] = item.amountValue;
+          return acc;
+        }, {})
+      );
+    },
+    []
+  );
+
+  const closePantryConflictModal = useCallback(() => {
+    setPantryConflictModal(null);
+    setPantryConflictSelections({});
+    setPantryConflictQuantities({});
+  }, []);
+
+  const handleConfirmPantryConflict = useCallback(() => {
+    if (!pantryConflictModal) {
+      return;
+    }
+    if (!pantryConflictSelectedItems.length) {
+      closePantryConflictModal();
+      return;
+    }
+    const result = addItems(
+      pantryConflictSelectedItems.map((item) => {
+        const quantity =
+          typeof pantryConflictQuantities[item.id] === "number"
+            ? pantryConflictQuantities[item.id]
+            : null;
+        if (quantity === null) {
+          return item.ingredient;
+        }
+        const formatted = formatQuantityValue(quantity);
+        const value = [formatted, item.measureText, item.parsedLabel]
+          .filter((part) => part && part.trim().length)
+          .join(" ");
+        return { ...item.ingredient, value };
+      }),
+      undefined,
+      { ignorePantry: true }
+    );
+    closePantryConflictModal();
+    if (result.addedCount === 0) {
+      showToast("Select a shopping list first.", "error");
+      return;
+    }
+    const destinationLabel = activeShoppingList
+      ? activeShoppingList.isSelf
+        ? "your shopping list"
+        : `${activeShoppingList.ownerLabel}'s list`
+      : "your shopping list";
+    const itemLabel = result.addedCount === 1 ? "item" : "items";
+    showToast(
+      `${result.addedCount} pantry ${itemLabel} added to ${destinationLabel}.`,
+      "success",
+      {
+        onClick: () => router.push("/shopping-list"),
+        actionLabel: "View list",
+      }
+    );
+  }, [
+    activeShoppingList,
+    addItems,
+    closePantryConflictModal,
+    formatQuantityValue,
+    pantryConflictModal,
+    pantryConflictSelectedItems,
+    pantryConflictQuantities,
+    router,
+    showToast,
+  ]);
+
+  const togglePantryConflictSelection = useCallback((id: string) => {
+    setPantryConflictSelections((current) => ({
+      ...current,
+      [id]: !current[id],
+    }));
+  }, []);
+
+  const updatePantryConflictQuantity = useCallback(
+    (id: string, value: number | null) => {
+      setPantryConflictQuantities((current) => ({
+        ...current,
+        [id]: value,
+      }));
+    },
+    []
+  );
+
+  const adjustPantryConflictQuantity = useCallback(
+    (item: PantryConflictItem, delta: number) => {
+      const current =
+        typeof pantryConflictQuantities[item.id] === "number"
+          ? pantryConflictQuantities[item.id]!
+          : item.amountValue ?? 0;
+      const step =
+        item.amountValue !== null && !Number.isInteger(item.amountValue)
+          ? 0.5
+          : 1;
+      const next = Math.max(step, current + delta * step);
+      updatePantryConflictQuantity(item.id, next);
+    },
+    [pantryConflictQuantities, updatePantryConflictQuantity]
+  );
+
+  const handleAddToShoppingList = async (recipe: Recipe) => {
+    if (isAuthenticated) {
+      await Promise.allSettled([refreshCollaborativeLists(), refreshPantry()]);
+    }
+    const result = addItems(
       recipe.ingredients.map((ingredient) => ({
         value: ingredient,
         recipeId: recipe.id,
         recipeTitle: recipe.title,
       }))
     );
+    if (result.addedCount === 0) {
+      if (!result.skippedIngredients.length) {
+        showToast("Select a shopping list first.", "error");
+      }
+      if (result.skippedIngredients.length) {
+        openPantryConflictModal(recipe, result.skippedIngredients);
+      }
+      return;
+    }
+    if (result.skippedIngredients.length) {
+      openPantryConflictModal(recipe, result.skippedIngredients);
+    }
     const destinationLabel = activeShoppingList
       ? activeShoppingList.isSelf
         ? "your shopping list"
         : `${activeShoppingList.ownerLabel}'s list`
       : "your shopping list";
+    const skippedSuffix = result.skippedIngredients.length
+      ? ` Skipped ${result.skippedIngredients.length} pantry item${
+          result.skippedIngredients.length === 1 ? "" : "s"
+        }.`
+      : "";
     showToast(
-      `${recipe.title} ingredients now live in ${destinationLabel}.`,
+      `${recipe.title} ingredients now live in ${destinationLabel}.${skippedSuffix}`,
       "success",
       {
         onClick: () => router.push("/shopping-list"),
@@ -2293,9 +2491,7 @@ export default function HomePage() {
                                     ? "Leaving…"
                                     : "Leave recipe"}
                                 </span>
-                                <span className="text-xs text-rose-300">
-                                  ↩
-                                </span>
+                                <span className="text-xs text-rose-300">↩</span>
                               </button>
                             )}
                             <button
@@ -2384,8 +2580,145 @@ export default function HomePage() {
           </div>
         </section>
       </main>
+      {pantryConflictModal && (
+        <div className="fixed inset-0 z-60 flex items-center justify-center px-4 py-8">
+          <div
+            className="absolute inset-0 bg-slate-900/40 backdrop-blur-sm"
+            aria-hidden="true"
+            onClick={closePantryConflictModal}
+          />
+          <div
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="pantry-conflict-title"
+            className="relative z-70 w-full max-w-lg rounded-3xl border border-slate-100 bg-white p-6 shadow-2xl shadow-slate-900/10"
+          >
+            <div className="flex flex-col gap-4">
+              <div className="flex items-start gap-3">
+                <div className="flex h-12 w-12 items-center justify-center rounded-2xl bg-amber-50 text-amber-600">
+                  <span aria-hidden="true" className="text-lg font-semibold">
+                    !
+                  </span>
+                </div>
+                <div>
+                  <h2
+                    id="pantry-conflict-title"
+                    className="text-lg font-semibold text-slate-900"
+                  >
+                    Pantry match detected
+                  </h2>
+                  <p className="mt-1 text-sm text-slate-500">
+                    {pantryConflictNote}
+                  </p>
+                </div>
+              </div>
+              {hasPantryConflictSelections && (
+                <div className="max-h-64 space-y-2 overflow-y-auto pr-1">
+                  {pantryConflictModal.items.map((item) => {
+                    const inputId = `pantry-conflict-${item.id}`;
+                    const isSelected = Boolean(
+                      pantryConflictSelections[item.id]
+                    );
+                    const quantityValue =
+                      pantryConflictQuantities[item.id] ?? item.amountValue;
+                    const step =
+                      item.amountValue !== null &&
+                      !Number.isInteger(item.amountValue)
+                        ? 0.5
+                        : 1;
+                    return (
+                      <div
+                        key={item.id}
+                        className="rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-sm text-slate-700"
+                      >
+                        <label htmlFor={inputId} className="flex items-center gap-3">
+                          <input
+                            id={inputId}
+                            type="checkbox"
+                            checked={isSelected}
+                            onChange={() =>
+                              togglePantryConflictSelection(item.id)
+                            }
+                            className="h-4 w-4 accent-slate-900"
+                          />
+                          <span className="flex-1">{item.label}</span>
+                        </label>
+                        <div className="mt-2 flex items-center gap-2">
+                          {quantityValue === null ? (
+                            <span className="text-sm text-slate-500">
+                              Use recipe amount
+                            </span>
+                          ) : (
+                            <div className="flex flex-1 items-center gap-2">
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  if (!isSelected) {
+                                    togglePantryConflictSelection(item.id);
+                                  }
+                                  adjustPantryConflictQuantity(item, -1);
+                                }}
+                                className="inline-flex h-7 w-7 items-center justify-center rounded-full border border-slate-200 text-slate-600 transition hover:bg-slate-100"
+                                aria-label={`Decrease ${item.label} quantity`}
+                              >
+                                -
+                              </button>
+                              <div
+                                className="min-w-[3rem] text-center text-sm font-semibold text-slate-700"
+                              >
+                                {formatQuantityValue(quantityValue)}
+                              </div>
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  if (!isSelected) {
+                                    togglePantryConflictSelection(item.id);
+                                  }
+                                  adjustPantryConflictQuantity(item, 1);
+                                }}
+                                className="inline-flex h-7 w-7 items-center justify-center rounded-full border border-slate-200 text-slate-600 transition hover:bg-slate-100"
+                                aria-label={`Increase ${item.label} quantity`}
+                              >
+                                +
+                              </button>
+                              <span className="text-xs text-slate-500">
+                                {item.measureText || "units"}
+                              </span>
+                            </div>
+                          )}
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+              <div className="mt-2 flex flex-col gap-3 sm:flex-row sm:justify-end">
+                <button
+                  type="button"
+                  onClick={closePantryConflictModal}
+                  className="rounded-xl border border-slate-200 px-4 py-2 text-sm font-semibold text-slate-700 transition hover:bg-slate-50"
+                >
+                  Skip pantry items
+                </button>
+                {hasPantryConflictSelections && (
+                  <button
+                    type="button"
+                    onClick={handleConfirmPantryConflict}
+                    disabled={!pantryConflictSelectedItems.length}
+                    className="rounded-xl bg-slate-900 px-4 py-2 text-sm font-semibold text-white shadow-lg shadow-slate-200 transition hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-50"
+                  >
+                    {pantryConflictSelectedItems.length
+                      ? `Add selected (${pantryConflictSelectedItems.length})`
+                      : "Add selected"}
+                  </button>
+                )}
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
       {pendingDeletionRecipe && (
-        <div className="fixed inset-0 z-40 flex items-center justify-center px-4 py-8">
+        <div className="fixed inset-0 z-60 flex items-center justify-center px-4 py-8">
           <div
             className="absolute inset-0 bg-slate-900/40 backdrop-blur-sm"
             aria-hidden="true"
@@ -2395,7 +2728,7 @@ export default function HomePage() {
             role="dialog"
             aria-modal="true"
             aria-labelledby="delete-recipe-title"
-            className="relative z-50 w-full max-w-md rounded-3xl border border-slate-100 bg-white p-6 shadow-2xl shadow-slate-900/10"
+            className="relative z-70 w-full max-w-md rounded-3xl border border-slate-100 bg-white p-6 shadow-2xl shadow-slate-900/10"
           >
             <div className="flex flex-col gap-3">
               <div className="flex items-center gap-3">

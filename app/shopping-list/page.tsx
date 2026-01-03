@@ -289,6 +289,11 @@ export default function ShoppingListPage() {
     isSyncing,
     externalUpdateNotice,
     acknowledgeExternalUpdate,
+    pantryItems,
+    isPantrySyncing,
+    addPantryItem,
+    removePantryItem,
+    refreshPantry,
   } = useShoppingList();
   const { showToast } = useToast();
   const { refreshCollaborations } = useCollaborationUI();
@@ -302,6 +307,10 @@ export default function ShoppingListPage() {
   const [isQuickAddActive, setIsQuickAddActive] = useState(false);
   const [quickAddDraft, setQuickAddDraft] = useState("");
   const [quickAddError, setQuickAddError] = useState<string | null>(null);
+  const [pantryDraft, setPantryDraft] = useState("");
+  const [pantryError, setPantryError] = useState<string | null>(null);
+  const [isPantrySaving, setIsPantrySaving] = useState(false);
+  const [removingPantryId, setRemovingPantryId] = useState<string | null>(null);
   const swipeSessionRef = useRef<SwipeSession | null>(null);
   const quickAddInputRef = useRef<HTMLInputElement | null>(null);
   const itemsRef = useRef(items);
@@ -548,6 +557,23 @@ export default function ShoppingListPage() {
           ? { x: window.scrollX, y: window.scrollY }
           : null;
       setCrossedOff(item.storageKey, nextCrossed, ownerId);
+      if (nextCrossed && item.isSelf && isAuthenticated) {
+        showToast(`${item.label} checked off. Add to pantry?`, "success", {
+          actionLabel: "Add to pantry",
+          onClick: () => {
+            void addPantryItem({ label: item.label })
+              .then(() => showToast(`${item.label} saved to pantry.`))
+              .catch((error) =>
+                showToast(
+                  error instanceof Error
+                    ? error.message
+                    : "Unable to save pantry item.",
+                  "error"
+                )
+              );
+          },
+        });
+      }
       if (!nextCrossed && button) {
         window.requestAnimationFrame(() => {
           if (!button.isConnected) {
@@ -557,7 +583,13 @@ export default function ShoppingListPage() {
         });
       }
     },
-    [focusWithoutScroll, setCrossedOff]
+    [
+      addPantryItem,
+      focusWithoutScroll,
+      isAuthenticated,
+      setCrossedOff,
+      showToast,
+    ]
   );
 
   const orderSnapshotRef = useRef<Map<string, Map<string, string[]>>>(
@@ -735,6 +767,70 @@ export default function ShoppingListPage() {
     [activeOwnerId, addItems, quickAddDraft]
   );
 
+  const handlePantrySubmit = useCallback(
+    async (event: FormEvent<HTMLFormElement>) => {
+      event.preventDefault();
+      const trimmed = pantryDraft.trim();
+      if (!trimmed) {
+        setPantryError("Enter a pantry staple");
+        return;
+      }
+      setIsPantrySaving(true);
+      try {
+        await addPantryItem({ label: trimmed });
+        setPantryDraft("");
+        setPantryError(null);
+        showToast("Saved to pantry.");
+      } catch (error) {
+        const message =
+          error instanceof Error
+            ? error.message
+            : "Unable to save pantry item.";
+        setPantryError(message);
+      } finally {
+        setIsPantrySaving(false);
+      }
+    },
+    [addPantryItem, pantryDraft, showToast]
+  );
+
+  const handlePantryRemove = useCallback(
+    async (itemId: string, label: string) => {
+      setRemovingPantryId(itemId);
+      try {
+        await removePantryItem(itemId);
+        showToast(`${label} removed from pantry.`);
+      } catch (error) {
+        showToast(
+          error instanceof Error
+            ? error.message
+            : "Unable to remove pantry item.",
+          "error"
+        );
+      } finally {
+        setRemovingPantryId(null);
+      }
+    },
+    [removePantryItem, showToast]
+  );
+
+  const handleRefreshPantry = useCallback(async () => {
+    if (!isAuthenticated) {
+      return;
+    }
+    try {
+      await refreshPantry();
+      showToast("Pantry updated.");
+    } catch (error) {
+      showToast(
+        error instanceof Error
+          ? error.message
+          : "Unable to refresh pantry right now.",
+        "error"
+      );
+    }
+  }, [isAuthenticated, refreshPantry, showToast]);
+
   const resetSwipePreview = useCallback(() => {
     swipeSessionRef.current = null;
     setSwipePreview({ key: null, deltaX: 0, isActive: false });
@@ -875,7 +971,7 @@ export default function ShoppingListPage() {
           if (a.crossedAt === b.crossedAt) {
             return a.index - b.index;
           }
-          return (a.crossedAt ?? 0) - (b.crossedAt ?? 0);
+          return (b.crossedAt ?? 0) - (a.crossedAt ?? 0);
         }
         if (aCrossed || bCrossed) {
           return aCrossed ? 1 : -1;
@@ -1166,92 +1262,209 @@ export default function ShoppingListPage() {
           )}
         </header>
         <section className="rounded-3xl border border-white/70 bg-white/90 p-6 shadow-xl shadow-slate-200/70 backdrop-blur sm:p-8">
-          <div className="rounded-2xl border border-sky-100 bg-gradient-to-r from-white via-sky-50 to-white px-4 py-3 shadow-inner shadow-sky-100/60 sm:py-4">
-            {isQuickAddActive ? (
-              <form onSubmit={handleQuickAddSubmit} className="space-y-3">
-                <label className="block text-xs font-semibold uppercase tracking-[0.3em] text-slate-400">
-                  Quick add ingredient
-                  <input
-                    ref={quickAddInputRef}
-                    value={quickAddDraft}
-                    onChange={(event) =>
-                      handleQuickAddChange(event.target.value)
-                    }
-                    placeholder="e.g. 2 cups baby spinach"
-                    className="mt-2 w-full rounded-2xl border border-slate-200 bg-white/90 px-4 py-2 text-sm font-medium text-slate-900 outline-none transition focus:border-rose-400 focus:ring-4 focus:ring-rose-100"
-                  />
-                </label>
-                <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-end">
+          <div className="lg:grid lg:grid-cols-[minmax(0,3fr)_minmax(0,2fr)] lg:gap-8">
+            <div>
+              <div className="rounded-2xl border border-sky-100 bg-gradient-to-r from-white via-sky-50 to-white px-4 py-3 shadow-inner shadow-sky-100/60 sm:py-4">
+                {isQuickAddActive ? (
+                  <form onSubmit={handleQuickAddSubmit} className="space-y-3">
+                    <label className="block text-xs font-semibold uppercase tracking-[0.3em] text-slate-400">
+                      Quick add ingredient
+                      <input
+                        ref={quickAddInputRef}
+                        value={quickAddDraft}
+                        onChange={(event) =>
+                          handleQuickAddChange(event.target.value)
+                        }
+                        placeholder="e.g. 2 cups baby spinach"
+                        className="mt-2 w-full rounded-2xl border border-slate-200 bg-white/90 px-4 py-2 text-sm font-medium text-slate-900 outline-none transition focus:border-rose-400 focus:ring-4 focus:ring-rose-100"
+                      />
+                    </label>
+                    <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-end">
+                      <button
+                        type="button"
+                        onClick={handleCancelQuickAdd}
+                        className="inline-flex items-center justify-center rounded-2xl border border-slate-200 px-4 py-2 text-sm font-semibold text-slate-600 transition hover:border-slate-300"
+                      >
+                        Cancel
+                      </button>
+                      <button
+                        type="submit"
+                        className="inline-flex items-center justify-center rounded-2xl bg-slate-900 px-4 py-2 text-sm font-semibold text-white shadow-lg shadow-slate-900/25 transition disabled:cursor-not-allowed disabled:opacity-50"
+                        disabled={
+                          !quickAddDraft.trim() || !activeOwnerId || isSyncing
+                        }
+                      >
+                        Add item
+                      </button>
+                    </div>
+                    {/* <p className="text-[11px] uppercase tracking-[0.3em] text-slate-400">
+                      Type any ingredient you need and we&rsquo;ll keep it with the
+                      rest of your list.
+                    </p> */}
+                    {quickAddError && (
+                      <p className="text-xs font-semibold text-rose-600">
+                        {quickAddError}
+                      </p>
+                    )}
+                  </form>
+                ) : (
                   <button
                     type="button"
-                    onClick={handleCancelQuickAdd}
-                    className="inline-flex items-center justify-center rounded-2xl border border-slate-200 px-4 py-2 text-sm font-semibold text-slate-600 transition hover:border-slate-300"
+                    onClick={handleStartQuickAdd}
+                    className="w-full rounded-2xl border border-dashed border-sky-200 bg-white/70 px-4 py-3 text-sm font-semibold text-slate-600 shadow-sm transition hover:border-sky-300 hover:text-slate-900"
                   >
-                    Cancel
+                    + Add ingredient
                   </button>
-                  <button
-                    type="submit"
-                    className="inline-flex items-center justify-center rounded-2xl bg-slate-900 px-4 py-2 text-sm font-semibold text-white shadow-lg shadow-slate-900/25 transition disabled:cursor-not-allowed disabled:opacity-50"
-                    disabled={
-                      !quickAddDraft.trim() || !activeOwnerId || isSyncing
-                    }
-                  >
-                    Add item
-                  </button>
-                </div>
-                {/* <p className="text-[11px] uppercase tracking-[0.3em] text-slate-400">
-                  Type any ingredient you need and we&rsquo;ll keep it with the
-                  rest of your list.
-                </p> */}
-                {quickAddError && (
-                  <p className="text-xs font-semibold text-rose-600">
-                    {quickAddError}
-                  </p>
                 )}
-              </form>
-            ) : (
-              <button
-                type="button"
-                onClick={handleStartQuickAdd}
-                className="w-full rounded-2xl border border-dashed border-sky-200 bg-white/70 px-4 py-3 text-sm font-semibold text-slate-600 shadow-sm transition hover:border-sky-300 hover:text-slate-900"
-              >
-                + Add ingredient
-              </button>
-            )}
-          </div>
-          <div className="mt-4 sm:mt-6">
-            {showEmptyState ? (
-              <div className="flex flex-col items-center gap-4 text-center text-slate-500">
-                <div className="text-6xl">🥕</div>
-                <p className="text-lg font-medium">No ingredients yet.</p>
-                <p>
-                  Head back, pick a recipe, and we&rsquo;ll slot every
-                  ingredient here automatically.
+              </div>
+              <div className="mt-4 sm:mt-6">
+                {showEmptyState ? (
+                  <div className="flex flex-col items-center gap-4 text-center text-slate-500">
+                    <div className="text-6xl">🥕</div>
+                    <p className="text-lg font-medium">No ingredients yet.</p>
+                    <p>
+                      Head back, pick a recipe, and we&rsquo;ll slot every
+                      ingredient here automatically.
+                    </p>
+                  </div>
+                ) : isSyncing && renderEmptyState ? (
+                  <div className="flex flex-col items-center gap-4 text-center text-slate-500">
+                    <div className="text-6xl animate-pulse">🛒</div>
+                    <p className="text-lg font-medium">Syncing your list…</p>
+                  </div>
+                ) : (
+                  <DndContext
+                    sensors={sensors}
+                    collisionDetection={closestCenter}
+                    onDragEnd={handleDragEnd}
+                  >
+                    <SortableContext
+                      items={sortableActiveKeys}
+                      strategy={verticalListSortingStrategy}
+                    >
+                      <ul className="space-y-3">
+                        <AnimatePresence initial={false} mode="sync">
+                          {listElements}
+                        </AnimatePresence>
+                      </ul>
+                    </SortableContext>
+                  </DndContext>
+                )}
+              </div>
+            </div>
+            <aside className="mt-10 rounded-3xl border border-white/70 bg-white/85 p-6 shadow-xl shadow-slate-200/70 backdrop-blur lg:mt-0">
+              <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
+                <div>
+                  <p className="text-xs font-semibold uppercase tracking-[0.3em] text-slate-400">
+                    Pantry staples
+                  </p>
+                  <h2 className="mt-1 text-2xl font-semibold text-slate-900">
+                    Track what you already own
+                  </h2>
+                  <p className="mt-2 text-sm text-slate-500">
+                    Ingredients saved here stay off your shopping list when you
+                    import recipes.
+                  </p>
+                </div>
+                <div className="flex items-center gap-3">
+                  {isAuthenticated ? (
+                    <button
+                      type="button"
+                      onClick={handleRefreshPantry}
+                      disabled={isPantrySyncing}
+                      className="inline-flex items-center rounded-2xl border border-slate-200 bg-white/70 px-4 py-2 text-xs font-semibold text-slate-600 transition hover:text-slate-900 disabled:cursor-not-allowed disabled:opacity-60"
+                    >
+                      {isPantrySyncing ? "Refreshing…" : "Refresh"}
+                    </button>
+                  ) : (
+                    <button
+                      type="button"
+                      onClick={() => signIn()}
+                      className="inline-flex items-center rounded-2xl border border-slate-200 bg-white/70 px-4 py-2 text-xs font-semibold text-slate-600 transition hover:text-slate-900"
+                    >
+                      Sign in
+                    </button>
+                  )}
+                </div>
+              </div>
+              {isAuthenticated ? (
+                <>
+                  {pantryItems.length ? (
+                    <ul className="mt-6 space-y-3">
+                      {pantryItems.map((item) => (
+                        <li
+                          key={item.id}
+                          className="flex flex-col gap-2 rounded-2xl border border-slate-100 bg-white/80 px-4 py-3 shadow-sm sm:flex-row sm:items-center sm:justify-between"
+                        >
+                          <div>
+                            <p className="text-sm font-semibold text-slate-900">
+                              {item.label}
+                            </p>
+                          </div>
+                          <button
+                            type="button"
+                            onClick={() =>
+                              handlePantryRemove(item.id, item.label)
+                            }
+                            disabled={removingPantryId === item.id}
+                            className="inline-flex items-center justify-center rounded-2xl border border-rose-200 px-4 py-2 text-xs font-semibold text-rose-600 transition hover:bg-rose-50 disabled:cursor-wait disabled:opacity-70"
+                          >
+                            {removingPantryId === item.id
+                              ? "Removing…"
+                              : "Remove"}
+                          </button>
+                        </li>
+                      ))}
+                    </ul>
+                  ) : (
+                    <p className="mt-6 rounded-2xl border border-dashed border-slate-200 bg-white/70 px-4 py-5 text-sm text-slate-500">
+                      No pantry staples yet. Check off ingredients or add one
+                      below to start keeping your inventory in sync.
+                    </p>
+                  )}
+                  <form
+                    className="mt-6 flex flex-col gap-3 sm:flex-row"
+                    onSubmit={handlePantrySubmit}
+                  >
+                    <div className="flex-1">
+                      <label className="sr-only" htmlFor="pantry-add-input">
+                        Add pantry staple
+                      </label>
+                      <input
+                        id="pantry-add-input"
+                        type="text"
+                        value={pantryDraft}
+                        onChange={(event) => {
+                          setPantryDraft(event.target.value);
+                          if (pantryError) {
+                            setPantryError(null);
+                          }
+                        }}
+                        placeholder="E.g. 2 Bell Peppers"
+                        className="w-full rounded-2xl border border-slate-200 bg-white/70 px-4 py-3 text-sm text-slate-900 outline-none transition focus:border-emerald-400 focus:ring-4 focus:ring-emerald-50"
+                      />
+                      {pantryError && (
+                        <p className="mt-1 text-xs font-semibold text-rose-600">
+                          {pantryError}
+                        </p>
+                      )}
+                    </div>
+                    <button
+                      type="submit"
+                      disabled={isPantrySaving}
+                      className="inline-flex items-center justify-center rounded-2xl bg-emerald-500 px-5 py-3 text-sm font-semibold text-white shadow-lg shadow-emerald-200/70 transition hover:scale-[1.01] disabled:cursor-not-allowed disabled:opacity-60"
+                    >
+                      {isPantrySaving ? "Saving…" : "Save staple"}
+                    </button>
+                  </form>
+                </>
+              ) : (
+                <p className="mt-6 rounded-2xl border border-dashed border-slate-200 bg-white/70 px-4 py-5 text-sm text-slate-500">
+                  Sign in to keep a pantry inventory so recipes automatically
+                  skip your staples.
                 </p>
-              </div>
-            ) : isSyncing && renderEmptyState ? (
-              <div className="flex flex-col items-center gap-4 text-center text-slate-500">
-                <div className="text-6xl animate-pulse">🛒</div>
-                <p className="text-lg font-medium">Syncing your list…</p>
-              </div>
-            ) : (
-              <DndContext
-                sensors={sensors}
-                collisionDetection={closestCenter}
-                onDragEnd={handleDragEnd}
-              >
-                <SortableContext
-                  items={sortableActiveKeys}
-                  strategy={verticalListSortingStrategy}
-                >
-                  <ul className="space-y-3">
-                    <AnimatePresence initial={false} mode="sync">
-                      {listElements}
-                    </AnimatePresence>
-                  </ul>
-                </SortableContext>
-              </DndContext>
-            )}
+              )}
+            </aside>
           </div>
         </section>
         {isConfirmingClear && (

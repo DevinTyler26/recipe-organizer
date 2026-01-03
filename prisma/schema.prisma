@@ -4,7 +4,6 @@ generator client {
 
 datasource db {
   provider = "postgresql"
-  url      = env("DATABASE_URL")
 }
 
 model User {
@@ -23,6 +22,7 @@ model User {
   ownedShoppingListEntries      ShoppingListEntry[]  @relation("ShoppingListOwner")
   shoppingListEntriesCreated    ShoppingListEntry[]  @relation("ShoppingListCreatedBy")
   shoppingListEntriesUpdated    ShoppingListEntry[]  @relation("ShoppingListUpdatedBy")
+  pantryItems                   PantryItem[]
   collaborationInvitationsSent  Collaboration[]      @relation("CollaborationOwner")
   collaborationsAccepted        Collaboration[]      @relation("CollaborationCollaborator")
   recipeFavorites               RecipeFavorite[]
@@ -146,6 +146,20 @@ model ShoppingListEntry {
   updatedBy User @relation("ShoppingListUpdatedBy", fields: [updatedById], references: [id], onDelete: Cascade)
 
   @@index([ownerId, normalizedLabel])
+}
+
+model PantryItem {
+  id              String   @id @default(cuid())
+  ownerId         String
+  label           String
+  normalizedLabel String
+  addedAt         DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  owner User @relation(fields: [ownerId], references: [id], onDelete: Cascade)
+
+  @@unique([ownerId, normalizedLabel])
+  @@index([ownerId])
 }
 
 model Collaboration {

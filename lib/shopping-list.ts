@@ -105,6 +105,51 @@ export const MEASURE_OPTIONS = MEASURE_DEFINITIONS.map(
 
 const MEASURE_LOOKUP: Record<string, MeasureInfo> = {};
 
+const IRREGULAR_PLURALS: Record<string, string> = {
+  men: "man",
+  women: "woman",
+  children: "child",
+  teeth: "tooth",
+  feet: "foot",
+  geese: "goose",
+  mice: "mouse",
+  lice: "louse",
+  knives: "knife",
+  wives: "wife",
+  lives: "life",
+  leaves: "leaf",
+  loaves: "loaf",
+  halves: "half",
+  wolves: "wolf",
+  calves: "calf",
+  shelves: "shelf",
+  thieves: "thief",
+  tomatoes: "tomato",
+  potatoes: "potato",
+  heroes: "hero",
+  echoes: "echo",
+  buffaloes: "buffalo",
+  mosquitoes: "mosquito",
+  indices: "index",
+  matrices: "matrix",
+  fungi: "fungus",
+  cacti: "cactus",
+  nuclei: "nucleus",
+};
+
+const UNCOUNTABLE_TOKENS = new Set([
+  "fish",
+  "sheep",
+  "deer",
+  "money",
+  "rice",
+  "bread",
+  "water",
+  "salt",
+  "sugar",
+  "flour",
+]);
+
 MEASURE_DEFINITIONS.forEach(({ canonical, plural, aliases }) => {
   const info: MeasureInfo = { canonical, plural: plural ?? `${canonical}s` };
   aliases.forEach((alias) => {
@@ -126,7 +171,14 @@ const UNICODE_FRACTIONS: Record<string, number> = {
 
 export const MEASURE_WORDS = new Set(Object.keys(MEASURE_LOOKUP));
 
-export const normalizeLabel = (value: string) => value.trim().toLowerCase();
+export const normalizeLabel = (value: string) => {
+  const collapsed = value.trim().toLowerCase();
+  if (!collapsed) {
+    return "";
+  }
+  const tokens = collapsed.split(/\s+/).map((token) => singularizeToken(token));
+  return tokens.join(" ");
+};
 
 export function parseIngredient(rawValue: string): ParsedIngredient {
   const trimmed = rawValue.trim();
@@ -254,6 +306,34 @@ function formatLabel(value: string) {
     )
     .join(" ")
     .trim();
+}
+
+function singularizeToken(token: string) {
+  if (!token) {
+    return token;
+  }
+  if (!/^[a-z]+$/.test(token)) {
+    return token;
+  }
+  if (UNCOUNTABLE_TOKENS.has(token)) {
+    return token;
+  }
+  if (IRREGULAR_PLURALS[token]) {
+    return IRREGULAR_PLURALS[token];
+  }
+  if (token.endsWith("ies") && token.length > 3) {
+    return token.slice(0, -3) + "y";
+  }
+  if (token.endsWith("ves") && token.length > 3) {
+    return token.slice(0, -3) + "f";
+  }
+  if (/(ches|shes|sses|xes|zes)$/.test(token) && token.length > 3) {
+    return token.slice(0, -2);
+  }
+  if (token.endsWith("s") && !token.endsWith("ss") && token.length > 3) {
+    return token.slice(0, -1);
+  }
+  return token;
 }
 
 function parseNumericToken(token: string): number | null {

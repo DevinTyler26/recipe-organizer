@@ -47,8 +47,8 @@ type ShoppingListContextValue = {
   addItems: (
     items: IncomingIngredient[],
     ownerId?: string,
-    options?: { position?: "start" | "end" }
-  ) => void;
+    options?: { position?: "start" | "end"; ignorePantry?: boolean }
+  ) => AddItemsResult;
   removeItem: (key: string, ownerId?: string) => void;
   clearList: (ownerId?: string) => void;
   reorderItems: (keys: string[], ownerId?: string) => void;
@@ -66,7 +66,24 @@ type ShoppingListContextValue = {
   acknowledgeExternalUpdate: () => void;
   refreshCollaborativeLists: () => Promise<void>;
   hasLoadedStoredSelection: boolean;
+  pantryItems: PantryItemRecord[];
+  isPantrySyncing: boolean;
+  addPantryItem: (input: PantryItemInput) => Promise<PantryItemRecord>;
+  removePantryItem: (id: string) => Promise<void>;
+  refreshPantry: () => Promise<void>;
 };
+
+type AddItemsResult = {
+  addedCount: number;
+  skippedLabels: string[];
+  skippedIngredients: SkippedIngredient[];
+};
+
+type SkippedIngredient = {
+  label: string;
+  ingredient: IncomingIngredient;
+};
+
 
 type OwnerListState = {
   ownerId: string;
@@ -121,6 +138,18 @@ export type ShoppingListListMeta = {
   ownerDisplayName: string;
   isSelf: boolean;
   totalItems: number;
+};
+
+export type PantryItemRecord = {
+  id: string;
+  label: string;
+  normalizedLabel: string;
+  addedAt: number;
+  updatedAt: number;
+};
+
+type PantryItemInput = {
+  label: string;
 };
 
 const ShoppingListContext = createContext<ShoppingListContextValue | null>(
@@ -208,6 +237,11 @@ export function ShoppingListProvider({ children }: { children: ReactNode }) {
   });
   const [remoteLists, setRemoteLists] = useState<OwnerListState[]>([]);
   const remoteListsRef = useRef<OwnerListState[]>([]);
+  const [pantryItems, setPantryItems] = useState<PantryItemRecord[]>([]);
+  const [isPantrySyncing, setIsPantrySyncing] = useState(false);
+  const pantryLookupRef = useRef<Set<string>>(new Set());
+  const pantryHydratedRef = useRef(false);
+  const pantryOwnerIdRef = useRef<string | null>(null);
   const [isRemote, setIsRemote] = useState(false);
   const [hasSyncedRemoteLists, setHasSyncedRemoteLists] = useState(false);
   const [isSyncing, setIsSyncing] = useState(false);
@@ -250,6 +284,26 @@ export function ShoppingListProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     remoteListsRef.current = remoteLists;
   }, [remoteLists]);
+
+  useEffect(() => {
+    pantryLookupRef.current = new Set(
+      pantryItems.map((item) => item.normalizedLabel)
+    );
+  }, [pantryItems]);
+
+  useEffect(() => {
+    if (isAuthenticated) {
+      return;
+    }
+    pantryHydratedRef.current = false;
+    pantryLookupRef.current = new Set();
+    pantryOwnerIdRef.current = null;
+    setPantryItems([]);
+  }, [isAuthenticated]);
+
+  useEffect(() => {
+    pantryHydratedRef.current = false;
+  }, [currentUserId]);
 
   const syncOfflineQueueWithWorker = useCallback(
     async (mutations: OfflineMutation[]) => {
@@ -377,6 +431,111 @@ export function ShoppingListProvider({ children }: { children: ReactNode }) {
       state: reviveStore(list.state),
     }));
   }, [derivedSelfDisplayName]);
+
+  const refreshPantry = useCallback(async () => {
+    const ownerId = pantryOwnerIdRef.current;
+    if (!isAuthenticated || !ownerId) {
+      return;
+    }
+    pantryHydratedRef.current = true;
+    setIsPantrySyncing(true);
+    try {
+      const response = await fetch(
+        `/api/pantry?ownerId=${encodeURIComponent(ownerId)}`,
+        { cache: "no-store" }
+      );
+      const body = (await response.json().catch(() => null)) as {
+        items?: PantryApiItem[];
+        error?: string;
+      } | null;
+      if (!response.ok || !Array.isArray(body?.items)) {
+        throw new Error(body?.error ?? "Failed to load pantry");
+      }
+      const mapped = sortPantryRecords(body.items.map(mapPantryApiItem));
+      setPantryItems(mapped);
+    } catch (error) {
+      console.error("Failed to load pantry items", error);
+      throw error instanceof Error
+        ? error
+        : new Error("Failed to load pantry items");
+    } finally {
+      setIsPantrySyncing(false);
+    }
+  }, [isAuthenticated]);
+
+  useEffect(() => {
+    if (!isAuthenticated || !pantryOwnerIdRef.current) {
+      return;
+    }
+    if (pantryHydratedRef.current) {
+      return;
+    }
+    pantryHydratedRef.current = true;
+    void refreshPantry().catch(() => undefined);
+  }, [isAuthenticated, refreshPantry]);
+
+  const addPantryItem = useCallback(
+    async (input: PantryItemInput): Promise<PantryItemRecord> => {
+      const ownerId = pantryOwnerIdRef.current;
+      if (!isAuthenticated || !ownerId) {
+        throw new Error("Sign in to save pantry items.");
+      }
+      const trimmedLabel = input.label.trim();
+      if (!trimmedLabel) {
+        throw new Error("Enter an item name.");
+      }
+      const response = await fetch("/api/pantry", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ label: trimmedLabel, ownerId }),
+      });
+      const payload = (await response.json().catch(() => null)) as {
+        item?: PantryApiItem;
+        error?: string;
+      } | null;
+      if (!response.ok || !payload?.item) {
+        throw new Error(payload?.error ?? "Unable to save pantry item.");
+      }
+      const record = mapPantryApiItem(payload.item);
+      setPantryItems((current) => {
+        const next = current.filter((item) => item.id !== record.id);
+        next.push(record);
+        return sortPantryRecords(next);
+      });
+      return record;
+    },
+    [isAuthenticated]
+  );
+
+  const removePantryItem = useCallback(
+    async (id: string) => {
+      const ownerId = pantryOwnerIdRef.current;
+      if (!isAuthenticated || !ownerId) {
+        throw new Error("Sign in to edit your pantry.");
+      }
+      if (!id) {
+        throw new Error("Missing pantry item identifier.");
+      }
+      const response = await fetch(
+        `/api/pantry?id=${encodeURIComponent(id)}&ownerId=${encodeURIComponent(
+          ownerId
+        )}`,
+        {
+          method: "DELETE",
+        }
+      );
+      const payload = (await response.json().catch(() => null)) as {
+        error?: string;
+      } | null;
+      if (!response.ok) {
+        throw new Error(payload?.error ?? "Unable to remove pantry item.");
+      }
+      setPantryItems((current) =>
+        current.filter((existing) => existing.id !== id)
+      );
+    },
+    [isAuthenticated]
+  );
 
   const acknowledgeExternalUpdate = useCallback(() => {
     setExternalUpdateNotice(null);
@@ -997,61 +1156,154 @@ export function ShoppingListProvider({ children }: { children: ReactNode }) {
     [currentUserId, isAuthenticated, selectedOwnerId]
   );
 
+  const filterIngredientsAgainstPantry = useCallback(
+    (
+      ingredients: IncomingIngredient[],
+      ownerId: string | null
+    ): {
+      filtered: IncomingIngredient[];
+      skipped: SkippedIngredient[];
+    } => {
+      if (
+        !ownerId ||
+        !pantryOwnerIdRef.current ||
+        ownerId !== pantryOwnerIdRef.current ||
+        !pantryLookupRef.current.size
+      ) {
+        return { filtered: ingredients, skipped: [] };
+      }
+      const skipped = new Map<string, IncomingIngredient>();
+      const filtered: IncomingIngredient[] = [];
+      const addSkipped = (label: string, ingredient: IncomingIngredient) => {
+        if (!skipped.has(label)) {
+          skipped.set(label, ingredient);
+        }
+      };
+      ingredients.forEach((ingredient) => {
+        if (!ingredient.recipeId) {
+          filtered.push(ingredient);
+          return;
+        }
+        const parsed = parseIngredient(ingredient.value);
+        const normalized =
+          parsed.normalizedLabel || normalizeLabel(parsed.label);
+        if (!normalized) {
+          filtered.push(ingredient);
+          return;
+        }
+        const labelForMessages = parsed.label || ingredient.value;
+        if (pantryLookupRef.current.has(normalized)) {
+          addSkipped(labelForMessages, ingredient);
+          return;
+        }
+        filtered.push(ingredient);
+      });
+      return {
+        filtered,
+        skipped: Array.from(skipped, ([label, ingredient]) => ({
+          label,
+          ingredient,
+        })),
+      };
+    },
+    [pantryItems]
+  );
+
   const addItems = useCallback(
     (
       ingredients: IncomingIngredient[],
       ownerOverride?: string,
-      options?: { position?: "start" | "end" }
-    ) => {
-      if (!ingredients.length) return;
+      options?: { position?: "start" | "end"; ignorePantry?: boolean }
+    ): AddItemsResult => {
+      if (!ingredients.length) {
+        return {
+          addedCount: 0,
+          skippedLabels: [],
+          skippedIngredients: [],
+        };
+      }
       if (!isAuthenticated) {
         setLocalStore((current) =>
           addIngredientsToState(current, ingredients, options?.position)
         );
-        return;
+        return {
+          addedCount: ingredients.length,
+          skippedLabels: [],
+          skippedIngredients: [],
+        };
       }
 
       const targetOwnerId = resolveOwnerId(ownerOverride);
       if (!targetOwnerId) {
         console.warn("No shopping list owner available for new items");
-        return;
+        return {
+          addedCount: 0,
+          skippedLabels: [],
+          skippedIngredients: [],
+        };
       }
 
       if (targetOwnerId === LOCAL_OWNER_ID) {
         setLocalStore((current) =>
           addIngredientsToState(current, ingredients, options?.position)
         );
-        return;
+        return {
+          addedCount: ingredients.length,
+          skippedLabels: [],
+          skippedIngredients: [],
+        };
+      }
+
+      const { filtered, skipped } = options?.ignorePantry
+        ? { filtered: ingredients, skipped: [] }
+        : filterIngredientsAgainstPantry(ingredients, targetOwnerId);
+      const skippedLabels = skipped.map((entry) => entry.label);
+      if (!filtered.length) {
+        return {
+          addedCount: 0,
+          skippedLabels,
+          skippedIngredients: skipped,
+        };
       }
 
       if (!isClientOnline) {
         const didUpdate = applyOwnerStateMutation(targetOwnerId, (state) =>
-          addIngredientsToState(state, ingredients, options?.position)
+          addIngredientsToState(state, filtered, options?.position)
         );
         if (didUpdate) {
           queueOfflineMutation({
             kind: "ADD_ITEMS",
             ownerId: targetOwnerId,
-            ingredients,
+            ingredients: filtered,
             position: options?.position,
           });
         }
-        return;
+        return {
+          addedCount: filtered.length,
+          skippedLabels,
+          skippedIngredients: skipped,
+        };
       }
 
       void applyOwnerStateMutation(targetOwnerId, (state) =>
-        addIngredientsToState(state, ingredients, options?.position)
+        addIngredientsToState(state, filtered, options?.position)
       );
 
       void runRemoteMutation({
         kind: "ADD_ITEMS",
         ownerId: targetOwnerId,
-        ingredients,
+        ingredients: filtered,
         position: options?.position,
       });
+      return {
+        addedCount: filtered.length,
+        skippedLabels,
+        skippedIngredients: skipped,
+      };
     },
     [
       applyOwnerStateMutation,
+      filterIngredientsAgainstPantry,
       isAuthenticated,
       isClientOnline,
       queueOfflineMutation,
@@ -1561,6 +1813,26 @@ export function ShoppingListProvider({ children }: { children: ReactNode }) {
     return resolvedLists[0] ?? null;
   }, [resolvedLists, selectedOwnerId]);
 
+  const activePantryOwnerId = useMemo(() => {
+    if (!isAuthenticated) {
+      return null;
+    }
+    return activeList?.ownerId ?? currentUserId ?? null;
+  }, [activeList?.ownerId, currentUserId, isAuthenticated]);
+
+  useEffect(() => {
+    if (pantryOwnerIdRef.current === activePantryOwnerId) {
+      return;
+    }
+    pantryOwnerIdRef.current = activePantryOwnerId;
+    pantryHydratedRef.current = false;
+    pantryLookupRef.current = new Set();
+    setPantryItems([]);
+    if (activePantryOwnerId && isAuthenticated) {
+      void refreshPantry().catch(() => undefined);
+    }
+  }, [activePantryOwnerId, isAuthenticated, refreshPantry]);
+
   const items = useMemo(() => {
     if (!activeList) return [];
     return mapStateToItems(activeList.state, activeList);
@@ -1684,6 +1956,11 @@ export function ShoppingListProvider({ children }: { children: ReactNode }) {
       acknowledgeExternalUpdate,
       refreshCollaborativeLists,
       hasLoadedStoredSelection,
+      pantryItems,
+      isPantrySyncing,
+      addPantryItem,
+      removePantryItem,
+      refreshPantry,
     }),
     [
       items,
@@ -1705,6 +1982,11 @@ export function ShoppingListProvider({ children }: { children: ReactNode }) {
       acknowledgeExternalUpdate,
       refreshCollaborativeLists,
       hasLoadedStoredSelection,
+      pantryItems,
+      isPantrySyncing,
+      addPantryItem,
+      removePantryItem,
+      refreshPantry,
     ]
   );
 
@@ -1818,6 +2100,29 @@ function mapStateToItems(
       return a.label.localeCompare(b.label);
     });
 }
+
+type PantryApiItem = {
+  id: string;
+  label: string;
+  normalizedLabel: string;
+  addedAt?: string;
+  updatedAt?: string;
+};
+
+function mapPantryApiItem(payload: PantryApiItem): PantryItemRecord {
+  return {
+    id: payload.id,
+    label: payload.label,
+    normalizedLabel: payload.normalizedLabel,
+    addedAt: payload.addedAt ? Date.parse(payload.addedAt) : Date.now(),
+    updatedAt: payload.updatedAt ? Date.parse(payload.updatedAt) : Date.now(),
+  };
+}
+
+function sortPantryRecords(records: PantryItemRecord[]) {
+  return [...records].sort((a, b) => a.label.localeCompare(b.label));
+}
+
 
 function serializeListState(state: ShoppingListState) {
   const payload = Object.entries(state)
