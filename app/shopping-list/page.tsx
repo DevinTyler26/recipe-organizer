@@ -952,7 +952,10 @@ export default function ShoppingListPage() {
     return `${totalItems} item${totalItems === 1 ? "" : "s"} ready to shop.`;
   }, [emptyState, hasHydrated, totalItems]);
 
-  const rawItems = hasHydrated ? items : [];
+  const rawItems = useMemo(
+    () => (hasHydrated ? items : []),
+    [hasHydrated, items]
+  );
 
   const displayItems = useMemo(() => {
     if (!hasHydrated) {
@@ -1440,7 +1443,7 @@ export default function ShoppingListPage() {
                             setPantryError(null);
                           }
                         }}
-                        placeholder="E.g. 2 Bell Peppers"
+                        placeholder="E.g. Bell Peppers"
                         className="w-full rounded-2xl border border-slate-200 bg-white/70 px-4 py-3 text-sm text-slate-900 outline-none transition focus:border-emerald-400 focus:ring-4 focus:ring-emerald-50"
                       />
                       {pantryError && (

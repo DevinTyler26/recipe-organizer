@@ -1206,7 +1206,7 @@ export function ShoppingListProvider({ children }: { children: ReactNode }) {
         })),
       };
     },
-    [pantryItems]
+    []
   );
 
   const addItems = useCallback(
