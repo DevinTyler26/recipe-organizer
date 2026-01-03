@@ -952,7 +952,10 @@ export default function ShoppingListPage() {
     return `${totalItems} item${totalItems === 1 ? "" : "s"} ready to shop.`;
   }, [emptyState, hasHydrated, totalItems]);
 
-  const rawItems = hasHydrated ? items : [];
+  const rawItems = useMemo(
+    () => (hasHydrated ? items : []),
+    [hasHydrated, items]
+  );
 
   const displayItems = useMemo(() => {
     if (!hasHydrated) {

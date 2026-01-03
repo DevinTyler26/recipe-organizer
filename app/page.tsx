@@ -2621,11 +2621,6 @@ export default function HomePage() {
                     );
                     const quantityValue =
                       pantryConflictQuantities[item.id] ?? item.amountValue;
-                    const step =
-                      item.amountValue !== null &&
-                      !Number.isInteger(item.amountValue)
-                        ? 0.5
-                        : 1;
                     return (
                       <div
                         key={item.id}
