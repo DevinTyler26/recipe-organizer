@@ -20,11 +20,11 @@ services:
     image: postgres:16
     container_name: recipe-postgres
     ports:
-      - "5432:5432"
+      - "${POSTGRES_HOST_PORT:-5432}:5432"
     environment:
-      POSTGRES_DB: recipes
-      POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: ${POSTGRES_DB:-recipe_organizer}
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
@@ -32,12 +32,6 @@ services:
       interval: 5s
       timeout: 5s
       retries: 5
-    networks:
-      - shared-db
 
 volumes:
   postgres_data:
-
-networks:
-  shared-db:
-    external: true
