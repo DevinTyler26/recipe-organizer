@@ -1,0 +1,12 @@
+.git
+.next
+node_modules
+npm-debug.log
+Dockerfile
+.dockerignore
+.env
+.env.*
+**/*.log
+**/.DS_Store
+__tests__
+coverage
