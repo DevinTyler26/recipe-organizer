@@ -1,3 +1,9 @@
+## <small>1.2.1 (2026-01-26)</small>
+
+* Merge branch 'main' of github.com:DevinTyler26/recipe-organizer ([132f3a9](https://github.com/DevinTyler26/recipe-organizer/commit/132f3a9))
+* fix: remove .env ([f99c3bb](https://github.com/DevinTyler26/recipe-organizer/commit/f99c3bb))
+* ci: dockerize (#31) ([94074a7](https://github.com/DevinTyler26/recipe-organizer/commit/94074a7)), closes [#31](https://github.com/DevinTyler26/recipe-organizer/issues/31)
+
 ## 1.2.0 (2026-01-03)
 
 * feat(pantry): trigger build (#30) ([2616e4f](https://github.com/DevinTyler26/recipe-organizer/commit/2616e4f)), closes [#30](https://github.com/DevinTyler26/recipe-organizer/issues/30)
